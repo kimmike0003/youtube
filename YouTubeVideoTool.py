@@ -380,7 +380,7 @@ class VideoMergerWorker(QThread):
     finished = pyqtSignal(str, float)
     error = pyqtSignal(str)
 
-    def __init__(self, image_dir, audio_dir, output_dir, subtitles=None, style=None, volume=1.0, trim_end=0.0):
+    def __init__(self, image_dir, audio_dir, output_dir, subtitles=None, style=None, volume=1.0, trim_end=0.0, use_random_effects=False):
         super().__init__()
         self.image_dir = image_dir
         self.audio_dir = audio_dir
@@ -389,6 +389,7 @@ class VideoMergerWorker(QThread):
         self.style = style
         self.volume = volume
         self.trim_end = trim_end
+        self.use_random_effects = use_random_effects
         os.makedirs(self.output_dir, exist_ok=True)
 
     def run(self):
@@ -415,7 +416,43 @@ class VideoMergerWorker(QThread):
                 
                 img_path = os.path.join(self.image_dir, img_name)
                 output_path = os.path.join(self.output_dir, base_name + ".mp4")
-                tasks.append((img_path, audio_path, output_path, base_name))
+                
+                # 랜덤 효과 설정 생성
+                item_effect = None
+                if self.use_random_effects:
+                    import random
+                    # 효과: 1(Zoom In), 2(Pan L-R), 3(Pan R-L)
+                    # Zoom Out 은 Zoom In 과 반대인데, start/end를 뒤집으면 됨.
+                    # 하지만 현재 코드 상 Type 1은 start->end.
+                    # 사용자 요청: Zoom In, Out, L->R, R->L
+                    # Type 1: Zoom (Generic) -> we can randomize start/end scale
+                    # Type 2: Pan L->R
+                    # Type 3: Pan R->L
+                    
+                    eff_type = random.choice([1, 1, 2, 3]) # Zoom 비중을 조금 높임? 아니면 균등하게 1,2,3
+                    # Zoom In/Out case for Type 1
+                    s_scale = 1.0
+                    e_scale = 1.1
+                    
+                    if eff_type == 1:
+                        # 50% 확률로 Zoom In or Zoom Out
+                        if random.random() > 0.5:
+                            # Zoom In
+                            s_scale = 1.0
+                            e_scale = 1.15
+                        else:
+                            # Zoom Out
+                            s_scale = 1.15
+                            e_scale = 1.0
+                    
+                    item_effect = {
+                        'type': eff_type,
+                        'start_scale': s_scale,
+                        'end_scale': e_scale,
+                        'pan_speed': 1.0
+                    }
+                
+                tasks.append((img_path, audio_path, output_path, base_name, item_effect))
 
             self.log_signal.emit(f"🚀 총 {len(tasks)}개의 영상 합성을 시작합니다. (병렬 처리 모드)")
             
@@ -445,7 +482,7 @@ class VideoMergerWorker(QThread):
             self.error.emit(f"치명적 오류: {e}")
 
     def process_single_video(self, task):
-        img_path, audio_path, output_path, base_name = task
+        img_path, audio_path, output_path, base_name, task_effect_config = task
         
         # 임시 파일 경로들 (정리용)
         temp_files = []
@@ -577,7 +614,9 @@ class VideoMergerWorker(QThread):
             # 원본 이미지를 타겟 해상도 비율에 맞게 조정 (Fit)
             
             # Effect Config 확인
-            effect_config = getattr(self, 'effect_config', None)
+            # 1. Task 별 개별 설정 (랜덤 효과 등) 우선
+            # 2. 클래스 속성 (Single Video 등) 차선
+            effect_config = task_effect_config if task_effect_config else getattr(self, 'effect_config', None)
             effect_type = effect_config.get('type', 0) if effect_config else 0
             
             # Debugging Effect Config
@@ -1046,7 +1085,13 @@ class SingleVideoWorker(VideoMergerWorker):
             else:
                 self.subtitles = None
             
-            task = (self.single_img, self.single_audio, self.single_output, base_name)
+            # SingleVideoWorker의 경우 task tuple에 effect_config를 None으로 추가해야 함 (부모 클래스 init을 따랐다면) 
+            # 하지만 SingleVideoWorker는 부모 process_single_video를 호출함.
+            # 부모가 task 언패킹을 5개로 바꿨으므로 맞춰줘야 함.
+            
+            # Single Video는 effect_config를 self.effect_config에 저장해둠.
+            # task에는 None을 넘기고 process_single_video 내부에서 getattr(self) fallback을 이용하도록 유도.
+            task = (self.single_img, self.single_audio, self.single_output, base_name, None)
             self.log_signal.emit(f"🎞️ 개별 영상 제작 시작: {base_name}...")
             
             success = self.process_single_video(task)
@@ -1684,6 +1729,29 @@ class MainApp(QWidget):
 
         # 메인 레이아웃을 탭 위젯으로 변경
         self.tabs = QTabWidget()
+        self.tabs.setElideMode(Qt.ElideNone) # 텍스트 잘림 방지
+        self.tabs.setUsesScrollButtons(True) # 탭이 많으면 스크롤 버튼 사용
+        self.tabs.tabBar().setExpanding(False) # 탭이 강제로 늘어나지 않고 글자 크기에 맞게 설정
+
+        # 탭 스타일 개선
+        self.tabs.setStyleSheet("""
+            QTabWidget::pane { border: 1px solid #444; top: -1px; }
+            QTabBar::tab {
+                background: #2b2b2b;
+                color: #b1b1b1;
+                border: 1px solid #444;
+                padding: 8px 15px;      /* 좌우 패딩 유지 */
+                font-size: 13px;
+                font-family: 'Malgun Gothic';
+                min-width: 110px;       /* 핵심: 탭의 최소 너비를 지정하여 글자 잘림 방지 */
+            }
+            QTabBar::tab:selected {
+                background: #444444;
+                color: #ffffff;
+                border-bottom-color: #444444;
+            }
+        """)
+        
         layout.addWidget(self.tabs)
 
         # 탭 1: GenSpark Image
@@ -2068,6 +2136,11 @@ class MainApp(QWidget):
         self.chk_use_sub = QCheckBox("자막 사용")
         self.chk_use_sub.setChecked(True)
         style_layout.addWidget(self.chk_use_sub, 0, 0)
+        
+        # 랜덤 효과 체크박스 추가
+        self.chk_random_effect = QCheckBox("랜덤 화면 효과 (Zoom/Pan 1.0->1.1)")
+        self.chk_random_effect.setChecked(False)
+        style_layout.addWidget(self.chk_random_effect, 0, 1, 1, 3)
 
         # 1행: 폰트 폴더
         font_folder_label = QLabel("폰트 폴더:")
@@ -2164,22 +2237,7 @@ class MainApp(QWidget):
         group.setLayout(style_layout)
         return group
 
-        # 로그
-        self.video_log = QTextEdit()
-        self.video_log.setReadOnly(True)
-        self.video_log.setStyleSheet("background-color: #1E1E1E; color: #D4D4D4;")
-        self.video_log.setMaximumHeight(120)
-        layout.addWidget(self.video_log)
 
-        # 여백 최적화
-        layout.setSpacing(5)
-        layout.setContentsMargins(10, 10, 10, 10)
-
-        # 기본 폰트 로드
-        self.load_custom_fonts()
-        self.update_color_indicators()
-
-        self.tab3.setLayout(layout)
 
     def initTab4(self):
         layout = QVBoxLayout()
@@ -2500,6 +2558,66 @@ class MainApp(QWidget):
         self.single_worker.error.connect(lambda e: [self.single_log.append(f"❌ 오류: {e}"), self.btn_start_single.setEnabled(True)])
         self.single_worker.start()
 
+    def start_video_merge(self):
+        # 작업 폴더 확인
+        workspace = self.video_workspace_path.text().strip()
+        if not os.path.exists(workspace):
+            QMessageBox.warning(self, "경로 오류", "작업 폴더가 존재하지 않습니다.")
+            return
+
+        # 스타일 dict 생성
+        style = {
+            'font_family': self.combo_font.currentText(),
+            'font_size': self.spin_font_size.value(),
+            'text_color': self.color_text,
+            'outline_color': self.color_outline if self.checkbox_use_outline.isChecked() else None,
+            'bg_color': self.color_bg if self.checkbox_use_bg.isChecked() else "Transparent",
+            'bg_opacity': self.slider_bg_opacity.value(),
+            'use_bg': self.checkbox_use_bg.isChecked(),
+            'use_outline': self.checkbox_use_outline.isChecked()
+        }
+        
+        # 폰트 검증
+        if not style['font_family']:
+            QMessageBox.warning(self, "폰트 오류", "폰트가 선택되지 않았습니다.")
+            return
+            
+        # 자막 리스트 로드 (JSON 우선)
+        # VideoMergerWorker 내부에서 각 mp3에 맞는 JSON을 찾아서 로드함.
+        # 여기서는 "자막 사용" 여부만 알리면 됨 (혹은 빈 딕셔너리 전달)
+        subtitles = {} # Worker will load from JSON
+        if not self.chk_use_sub.isChecked():
+            subtitles = None # 아예 자막 끔
+            
+        # 랜덤 효과 여부
+        use_random = getattr(self, 'chk_random_effect', None) and self.chk_random_effect.isChecked()
+
+        # 워커 시작
+        # output_dir = workspace/output
+        output_dir = os.path.join(workspace, "output_video")
+        
+        # Vol, Trim settings from Tab 5 (Single) - shared or distinct?
+        # User said shared.
+        vol = self.slider_volume.value() / 100.0
+        trim = self.spin_trim_end.value()
+        
+        self.merger_worker = VideoMergerWorker(
+            image_dir=workspace,
+            audio_dir=workspace,
+            output_dir=output_dir,
+            subtitles=subtitles,
+            style=style,
+            volume=vol,
+            trim_end=trim,
+            use_random_effects=use_random
+        )
+        self.merger_worker.log_signal.connect(self.video_log.append)
+        self.merger_worker.finished.connect(self.on_merge_finished)
+        self.merger_worker.error.connect(self.on_worker_error)
+        
+        self.set_btn_enable(False)
+        self.merger_worker.start()
+
     def run_mp3_trimming(self):
         audio_path = self.single_audio_path.text().strip()
         trim_val = self.spin_trim_end.value()
@@ -2727,41 +2845,7 @@ class MainApp(QWidget):
         if hasattr(self, 'video_log') and self.video_log:
             self.video_log.append(f"ℹ️ 폰트 로드 완료: {len(matched_families)}개의 폰트 패밀리 (Gmarket/Nanum/Malgun/Load)")
 
-    def start_video_merge(self):
-        workspace = self.video_workspace_path.text().strip()
-        img_dir = workspace
-        audio_dir = workspace
-        out_dir = workspace
 
-        if not os.path.exists(workspace):
-            self.video_log.append(f"❌ 폴더가 존재하지 않습니다: {workspace}")
-            return
-
-        # 자막 파싱 (JSON 자동 로드 사용 -> None 전달)
-        subtitles = None
-        # if self.chk_use_sub.isChecked():
-            # subtitles = self.parse_subtitles(self.video_sub_input.toPlainText())
-
-        style = {
-            'font_family': self.combo_font.currentText(),
-            'font_size': self.spin_font_size.value(),
-            'text_color': self.color_text,
-            'outline_color': self.color_outline,
-            'bg_color': self.color_bg,
-            'bg_opacity': int(self.slider_bg_opacity.value() * 2.55),
-            'use_bg': self.checkbox_use_bg.isChecked(),
-            'use_outline': self.checkbox_use_outline.isChecked()
-        }
-
-        self.btn_merge_video.setEnabled(False)
-        self.video_log.append("⏳ 영상 합성 작업을 시작합니다...")
-
-        volume_factor = self.slider_volume.value() / 100.0
-        self.merger_worker = VideoMergerWorker(img_dir, audio_dir, out_dir, subtitles, style, volume=volume_factor)
-        self.merger_worker.log_signal.connect(self.video_log.append)
-        self.merger_worker.finished.connect(self.on_video_merge_finished)
-        self.merger_worker.error.connect(lambda e: self.video_log.append(f"❌ 오류: {e}"))
-        self.merger_worker.start()
 
 
     def on_video_merge_finished(self, msg, elapsed):
@@ -3258,8 +3342,9 @@ class MainApp(QWidget):
         self.table_youtube.cellClicked.connect(self.on_table_cell_clicked) # Click Event
         
         header = self.table_youtube.horizontalHeader()
-        header.setSectionResizeMode(3, QHeaderView.Stretch) # 제목 Stretch
-        # header.setSectionResizeMode(QHeaderView.ResizeToContents)
+        # 모든 컬럼이 내용에 맞춰 늘어나도록 설정
+        header.setSectionResizeMode(QHeaderView.ResizeToContents)
+        # 썸네일(1), 제목(3) 등 일부 컬럼은 고정하거나 비율 조정이 필요할 수 있으나 우선 다 보이게 설정
         
         layout.addWidget(self.table_youtube)
 
@@ -3424,6 +3509,10 @@ class MainApp(QWidget):
         item.setText("") # Remove loading text
 
     def on_table_cell_clicked(self, row, col):
+        # 선택 시에도 컬럼 크기 유지 (또는 재조정)
+        header = self.table_youtube.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeToContents)
+
         item = self.table_youtube.item(row, col)
         if not item: return
         
@@ -3524,22 +3613,197 @@ if __name__ == '__main__':
     app = QApplication(sys.argv)
     
     # 다크 테마 적용
+    # Modern Dark Theme Setup
     app.setStyle("Fusion")
-    palette = QPalette()
-    palette.setColor(QPalette.Window, QColor(53, 53, 53))
-    palette.setColor(QPalette.WindowText, Qt.white)
-    palette.setColor(QPalette.Base, QColor(25, 25, 25))
-    palette.setColor(QPalette.AlternateBase, QColor(53, 53, 53))
-    palette.setColor(QPalette.ToolTipBase, Qt.white)
-    palette.setColor(QPalette.ToolTipText, Qt.white)
-    palette.setColor(QPalette.Text, Qt.white)
-    palette.setColor(QPalette.Button, QColor(53, 53, 53))
-    palette.setColor(QPalette.ButtonText, Qt.white)
-    palette.setColor(QPalette.BrightText, Qt.red)
-    palette.setColor(QPalette.Link, QColor(42, 130, 218))
-    palette.setColor(QPalette.Highlight, QColor(42, 130, 218))
-    palette.setColor(QPalette.HighlightedText, Qt.black)
-    app.setPalette(palette)
+    
+    # 1. Color Palette (VS Code Dark Theme Inspired)
+    dark_palette = QPalette()
+    
+    # Backgrounds
+    dark_palette.setColor(QPalette.Window, QColor(30, 30, 30))         # Main Window Background
+    dark_palette.setColor(QPalette.WindowText, QColor(220, 220, 220))  # Main Text
+    dark_palette.setColor(QPalette.Base, QColor(25, 25, 25))           # Input Fields Background
+    dark_palette.setColor(QPalette.AlternateBase, QColor(35, 35, 35))  # Alternate Background
+    dark_palette.setColor(QPalette.ToolTipBase, QColor(25, 25, 25))    # Tooltip Background
+    dark_palette.setColor(QPalette.ToolTipText, QColor(220, 220, 220)) # Tooltip Text
+    dark_palette.setColor(QPalette.Text, QColor(220, 220, 220))        # Input Text
+    
+    # Buttons & Inputs
+    dark_palette.setColor(QPalette.Button, QColor(45, 45, 45))         # Button Background
+    dark_palette.setColor(QPalette.ButtonText, QColor(220, 220, 220))  # Button Text
+    dark_palette.setColor(QPalette.BrightText, Qt.red)
+    
+    # Links & Highlights
+    dark_palette.setColor(QPalette.Link, QColor(0, 122, 204))          # Link Color
+    dark_palette.setColor(QPalette.Highlight, QColor(0, 122, 204))     # Selection Background
+    dark_palette.setColor(QPalette.HighlightedText, Qt.white)          # Selection Text
+    
+    # Disabled States
+    dark_palette.setColor(QPalette.Disabled, QPalette.Text, QColor(127, 127, 127))
+    dark_palette.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(127, 127, 127))
+    dark_palette.setColor(QPalette.Disabled, QPalette.Button, QColor(35, 35, 35))
+    
+    app.setPalette(dark_palette)
+    
+    # 2. Modern Stylesheet (QSS)
+    app.setStyleSheet("""
+        /* Global Reset */
+        * {
+            outline: none;
+        }
+        
+        /* Tooltips */
+        QToolTip { 
+            color: #dcdcdc; 
+            background-color: #252526; 
+            border: 1px solid #3e3e42; 
+        }
+
+        /* Message Boxes */
+        QMessageBox {
+            background-color: #1e1e1e;
+        }
+        QMessageBox QLabel {
+            color: #dcdcdc;
+        }
+
+        /* Input Fields (LineEdit, TextEdit, SpinBox, etc.) */
+        QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {
+            background-color: #2d2d2d; /* Slightly lighter than base for visibility */
+            color: #dcdcdc;
+            border: 1px solid #3e3e42;
+            border-radius: 4px;
+            padding: 5px;
+            selection-background-color: #007acc;
+        }
+        QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QSpinBox:focus, QComboBox:focus {
+            border: 1px solid #007acc;
+            background-color: #1e1e1e;
+        }
+        
+        /* Buttons - Modern Flat Look */
+        QPushButton {
+            background-color: #0e639c; /* Primary Blue */
+            color: white;
+            border: none;
+            border-radius: 4px;
+            padding: 6px 16px;
+            font-weight: bold;
+        }
+        QPushButton:hover {
+            background-color: #1177bb;
+        }
+        QPushButton:pressed {
+            background-color: #094771;
+            padding-top: 7px; /* Press effect */
+            padding-left: 17px;
+        }
+        QPushButton:disabled {
+            background-color: #3e3e42;
+            color: #888888;
+        }
+        
+        /* Group Box */
+        QGroupBox {
+            border: 1px solid #454545;
+            border-radius: 6px;
+            margin-top: 12px;
+            padding-top: 10px;
+            font-weight: bold;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            subcontrol-position: top left;
+            padding: 0 5px;
+            color: #007acc; /* Accent Color for Titles */
+        }
+        
+        /* Tab Widget */
+        QTabWidget::pane {
+            border: 1px solid #3e3e42;
+            background-color: #1e1e1e;
+            top: -1px; /* Align with tab bar */
+        }
+        QTabBar::tab {
+            background: #2d2d2d;
+            color: #aaaaaa;
+            padding: 8px 20px;
+            margin-right: 2px;
+            border-top-left-radius: 4px;
+            border-top-right-radius: 4px;
+        }
+        QTabBar::tab:selected {
+            background: #1e1e1e;
+            color: #ffffff;
+            border-top: 2px solid #007acc; /* Top Accent Line */
+            font-weight: bold;
+        }
+        QTabBar::tab:hover:!selected {
+            background: #3e3e40;
+            color: #ffffff;
+        }
+        
+        /* Table Widget */
+        QTableWidget {
+            gridline-color: #333333;
+            background-color: #1e1e1e;
+            selection-background-color: #094771; /* Darker Blue Selection */
+            selection-color: white;
+            border: 1px solid #3e3e42;
+        }
+        QHeaderView::section {
+            background-color: #252526;
+            color: #dcdcdc;
+            padding: 6px;
+            border: 1px solid #333333;
+            font-weight: bold;
+        }
+        QHeaderView::section:horizontal {
+            border-bottom: 2px solid #3e3e42;
+        }
+        QHeaderView::section:vertical {
+            border-right: 2px solid #3e3e42;
+        }
+        
+        /* Scrollbars (Webkit-like style for Qt) */
+        QScrollBar:vertical {
+            border: none;
+            background: #1e1e1e;
+            width: 14px;
+            margin: 0px 0px 0px 0px;
+        }
+        QScrollBar::handle:vertical {
+            background: #424242;
+            min-height: 20px;
+            border-radius: 7px;
+            margin: 2px;
+        }
+        QScrollBar::handle:vertical:hover {
+            background: #686868;
+        }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+            height: 0px;
+        }
+        
+        QScrollBar:horizontal {
+            border: none;
+            background: #1e1e1e;
+            height: 14px;
+            margin: 0px 0px 0px 0px;
+        }
+        QScrollBar::handle:horizontal {
+            background: #424242;
+            min-width: 20px;
+            border-radius: 7px;
+            margin: 2px;
+        }
+        QScrollBar::handle:horizontal:hover {
+            background: #686868;
+        }
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+            width: 0px;
+        }
+    """)
     
     try:
         ex = MainApp()
