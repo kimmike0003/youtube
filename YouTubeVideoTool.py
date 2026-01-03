@@ -1,4 +1,5 @@
 import sys
+import requests
 import subprocess
 import os
 import collections
@@ -184,6 +185,345 @@ class GenSparkMultiTabWorker(QThread):
             return driver.execute_script(script, old_srcs)
         except:
             return None
+
+class NanoBananaMultiTabWorker(QThread):
+    progress = pyqtSignal(str)
+    log_signal = pyqtSignal(str) 
+    finished = pyqtSignal(str, float)
+    error = pyqtSignal(str)
+
+    def copy_to_clipboard(self, text):
+        try:
+            import pyperclip
+            pyperclip.copy(text)
+        except ImportError:
+            pass
+
+    def __init__(self, file_path, items, driver, custom_target_dir=None):
+        super().__init__()
+        self.file_path = file_path
+        self.items = items
+        self.driver = driver
+        
+        if custom_target_dir:
+            self.target_dir = custom_target_dir
+        else:
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
+            self.target_dir = os.path.join(r"D:\ai\image", base_name)
+            
+        os.makedirs(self.target_dir, exist_ok=True)
+
+    def run(self):
+        start_timestamp = time.time()
+        try:
+            if len(self.driver.window_handles) < 2:
+                self.error.emit("❌ 오류: 브라우저 탭이 2개 미만입니다. 탭을 추가해주세요.")
+                return
+
+            tabs = self.driver.window_handles[:2]
+            wait = WebDriverWait(self.driver, 20)
+
+            total = len(self.items)
+            tab_status = {tabs[0]: None, tabs[1]: None}
+            tab_old_srcs = {tabs[0]: [], tabs[1]: []}
+            
+            processed_count = 0
+            item_idx = 0
+            failed_items = []
+
+            dumped = False
+
+            self.is_running = True
+            while processed_count < total and self.is_running:
+                for tab in tabs:
+                    if not self.is_running: break
+                    self.driver.switch_to.window(tab)
+                    
+                    # 디버깅: 페이지 소스 저장 (최초 1회)
+                    if not dumped:
+                        try:
+                            with open(r"d:\python\youtube\gemini_debug.html", "w", encoding="utf-8") as f:
+                                f.write(self.driver.page_source)
+                            self.log_signal.emit("🐛 디버깅용 페이지 소스가 저장되었습니다 (gemini_debug.html)")
+                            dumped = True
+                        except Exception as e:
+                            print(f"Dump failed: {e}")
+                    if not self.is_running: break
+                    self.driver.switch_to.window(tab)
+                    
+                    if tab_status[tab] is None and item_idx < total:
+                        current_item = self.items[item_idx]
+                        num, prompt = current_item
+                        self.log_signal.emit(f"▶ [탭 {tabs.index(tab)+1}] {num}번 생성 시작...")
+                        
+                        tab_old_srcs[tab] = self.driver.execute_script("return Array.from(document.querySelectorAll('img')).map(img => img.src);")
+                        
+                        # NanoBanana (Gemini) Input Handling
+                        # Target rich-textarea editor
+                        try:
+                            # 1. Try finding the contenteditable div directly
+                            input_box = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "div.ql-editor, div[contenteditable='true']")))
+                            input_box.click()
+                            time.sleep(0.5)
+                            
+                            # Clear existing text (Ctrl+A -> Delete)
+                            input_box.send_keys(Keys.CONTROL + "a")
+                            input_box.send_keys(Keys.DELETE)
+                            
+                            # Send Prompt
+                            # For rich text editors, sending keys usually works best.
+                            # Splitting lines might help if it's finicky, but standard send_keys usually fine.
+                            input_box.send_keys(prompt.strip())
+                            time.sleep(1)
+                            
+                            # Send Enter
+                            input_box.send_keys(Keys.ENTER)
+                            
+                        except Exception as e:
+                            self.log_signal.emit(f"  ⚠️ 입력창 찾기 실패 (재시도 중): {e}")
+                            # Fallback: JS injection (less reliable for rich text but worth a shot)
+                            try:
+                                js_script = """
+                                var editor = document.querySelector('div.ql-editor');
+                                if(editor) {
+                                    editor.innerText = arguments[0];
+                                    editor.dispatchEvent(new Event('input', { bubbles: true }));
+                                    // Enter trigger might need specific key events
+                                }
+                                """
+                                self.driver.execute_script(js_script, prompt.strip())
+                                time.sleep(1)
+                                input_box.send_keys(Keys.ENTER) 
+                            except:
+                                pass
+
+                        
+                        tab_status[tab] = {"item": current_item, "start_time": time.time()}
+                        item_idx += 1
+                        self.progress.emit(f"진행: {processed_count}/{total}")
+
+                    elif tab_status[tab] is not None:
+                        target_num = tab_status[tab]["item"][0]
+                        img_data = self.check_image_once(self.driver, tab_old_srcs[tab])
+                        
+                        if img_data:
+                            save_path = os.path.join(self.target_dir, f"{target_num}.png")
+                            with open(save_path, "wb") as f:
+                                f.write(base64.b64decode(img_data))
+                            self.log_signal.emit(f"  ✅ [탭 {tabs.index(tab)+1}] {target_num}번 저장 완료")
+                            tab_status[tab] = None
+                            processed_count += 1
+                        
+                        elif time.time() - tab_status[tab]["start_time"] > 220:
+                            self.log_signal.emit(f"  ❌ [탭 {tabs.index(tab)+1}] {target_num}번 타임아웃")
+                            failed_items.append(tab_status[tab]["item"])
+                            tab_status[tab] = None
+                            processed_count += 1
+                
+                time.sleep(1)
+
+            if not self.is_running:
+                 self.log_signal.emit("🛑 작업이 중지되었습니다.")
+                 
+            elapsed_time = time.time() - start_timestamp
+            result_msg = f"완료 (성공 {total - len(failed_items)} / 실패 {len(failed_items)})" if self.is_running else "중지됨"
+            self.finished.emit(result_msg, elapsed_time)
+
+        except Exception as e:
+            self.error.emit(str(e))
+
+    def stop(self):
+        self.is_running = False
+
+    def check_image_once(self, driver, old_srcs):
+        # Initialize failure tracking
+        if not hasattr(self, 'failed_srcs'):
+            self.failed_srcs = set()
+
+        try:
+            images = driver.find_elements(By.TAG_NAME, 'img')
+            
+            exclude = ['icon', 'svg', 'profile', 'avatar', 'btn', 'button', 'logo', 'gstatic.com', 'googleusercontent.com/gadgets']
+
+            # Search in reverse (newest first)
+            for img in reversed(images):
+                try:
+                    src = img.get_attribute('src')
+                    if not src: continue
+                    
+                    if src in old_srcs or src in self.failed_srcs:
+                        continue
+                        
+                    if any(k in src for k in exclude):
+                        continue
+
+                    # Scroll thumbnail into view
+                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", img)
+                    time.sleep(0.5) 
+
+                    # 1. Thumbnail Size Check
+                    size = img.size
+                    w, h = size['width'], size['height']
+                    
+                    if w < 200 or h < 200:
+                        continue
+                        
+                    # aspect ratio check
+                    ratio = w / h if h > 0 else 0
+                    if ratio > 3.0 or ratio < 0.3:
+                        continue
+
+                    # ** Try to open Lightbox (High-Res) **
+                    try:
+                        driver.execute_script("arguments[0].click();", img)
+                        
+                        best_img = None
+                        max_area = 0
+                        
+                        # Polling for high-res load (up to 10 seconds)
+                        for _ in range(10):
+                            time.sleep(1.0)
+                            
+                            current_imgs = driver.find_elements(By.TAG_NAME, 'img')
+                            best_img_candidate = None
+                            max_area_candidate = 0
+                            
+                            for m_img in current_imgs:
+                                try:
+                                    mw = int(m_img.get_attribute('naturalWidth') or 0)
+                                    mh = int(m_img.get_attribute('naturalHeight') or 0)
+                                    
+                                    if mw > 600 and (mw * mh > max_area_candidate):
+                                        max_area_candidate = mw * mh
+                                        best_img_candidate = m_img
+                                except:
+                                    continue
+                            
+                            
+                            if best_img_candidate:
+                                best_img = best_img_candidate
+                                max_area = max_area_candidate
+                                if best_img.is_displayed():
+                                    break
+                                else:
+                                    best_img = None
+                        
+                        result_data = None
+                        
+                        if best_img:
+                            src = best_img.get_attribute('src')
+                            
+                            # 1. Python Requests로 직접 다운로드 (가장 강력함 - 원본 파일 그대로 저장)
+                            if not result_data:
+                                try:
+                                    session = requests.Session()
+                                    # Selenium 쿠키 복사
+                                    cookies = driver.get_cookies()
+                                    for cookie in cookies:
+                                        session.cookies.set(cookie['name'], cookie['value'])
+                                    
+                                    headers = {
+                                        "User-Agent": driver.execute_script("return navigator.userAgent;")
+                                    }
+                                    
+                                    resp = session.get(src, headers=headers, timeout=15)
+                                    if resp.status_code == 200:
+                                        result_data = base64.b64encode(resp.content).decode('utf-8')
+                                        self.log_signal.emit("  📸 Requests로 원본 다운로드 성공")
+                                except Exception as e:
+                                    # self.log_signal.emit(f"  ⚠️ Requests 실패: {e}")
+                                    pass
+
+                            # 2. Fetch API (JS) 백업
+                            if not result_data:
+                                try:
+                                    script = """
+                                    var callback = arguments[arguments.length - 1];
+                                    var img = arguments[0];
+                                    var src = img.src;
+                                    
+                                    fetch(src)
+                                        .then(response => response.blob())
+                                        .then(blob => {
+                                            var reader = new FileReader();
+                                            reader.onloadend = function() {
+                                                callback(reader.result.split(',')[1]);
+                                            }
+                                            reader.readAsDataURL(blob);
+                                        })
+                                        .catch(err => {
+                                            callback(null);
+                                        });
+                                    """
+                                    result_data = driver.execute_async_script(script, best_img)
+                                    if result_data:
+                                        self.log_signal.emit("  📸 Fetch API로 원본 다운로드 성공")
+                                except:
+                                    pass
+                            
+                            # 3. 새 탭 열기 백업
+                            if not result_data:
+                                try:
+                                    current_handle = driver.current_window_handle
+                                    driver.execute_script("window.open(arguments[0], '_blank');", src)
+                                    time.sleep(2.0)
+                                    driver.switch_to.window(driver.window_handles[-1])
+                                    full_img = driver.find_element(By.TAG_NAME, 'img')
+                                    result_data = full_img.screenshot_as_base64
+                                    driver.close()
+                                    driver.switch_to.window(current_handle)
+                                    self.log_signal.emit("  📸 새 탭 열기로 캡처 성공")
+                                except:
+                                    try:
+                                        if len(driver.window_handles) > 2: driver.close()
+                                        driver.switch_to.window(current_handle)
+                                    except: pass
+                        
+                        # 4. 고해상도 실패 시 썸네일이라도 저장 (Fallback)
+                        if not result_data:
+                            self.log_signal.emit(f"  ⚠️ 고해상도 실패 -> 썸네일 안전 캡처 시도")
+                            # 썸네일이 화면 밖으로 나가지 않게 스타일 강제 조정
+                            try:
+                                driver.execute_script("""
+                                    arguments[0].style.position = 'fixed';
+                                    arguments[0].style.top = '50%';
+                                    arguments[0].style.left = '50%';
+                                    arguments[0].style.transform = 'translate(-50%, -50%)';
+                                    arguments[0].style.maxWidth = '90vw';
+                                    arguments[0].style.maxHeight = '90vh';
+                                    arguments[0].style.objectFit = 'contain';
+                                    arguments[0].style.zIndex = '99999';
+                                    arguments[0].style.backgroundColor = 'black';
+                                """, img)
+                                time.sleep(0.5)
+                                result_data = img.screenshot_as_base64
+                            except:
+                                result_data = img.screenshot_as_base64 # 진짜 최후의 수단
+                        
+                        # Close Lightbox (ESC)
+                        try:
+                            driver.find_element(By.TAG_NAME, 'body').send_keys(Keys.ESCAPE)
+                        except:
+                            pass
+                        time.sleep(0.5)
+                        
+                        if result_data:
+                            return result_data
+                        else:
+                            self.failed_srcs.add(src)
+                            
+                    except Exception:
+                        self.failed_srcs.add(src)
+                        pass
+                    
+                except Exception:
+                    continue
+                    
+            return None
+            
+        except Exception:
+            return None
+
 
 class ImageFXMultiTabWorker(GenSparkMultiTabWorker):
     def run(self):
@@ -395,26 +735,47 @@ class VideoMergerWorker(QThread):
     def run(self):
         start_time = time.time()
         try:
-            # 이미지 파일 리스트 (.jpg, .png, .jpeg)
-            img_files = [f for f in os.listdir(self.image_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+            # 오디오 파일 리스트 (.mp3)
+            if not os.path.exists(self.audio_dir):
+                self.error.emit("❌ 오디오 폴더를 찾을 수 없습니다.")
+                return
+
+            audio_files = [f for f in os.listdir(self.audio_dir) if f.lower().endswith('.mp3')]
             
-            total = len(img_files)
+            # 자연스러운 정렬 (1.mp3, 2.mp3, ... 10.mp3)
+            def natural_keys(text):
+                return [int(c) if c.isdigit() else c for c in re.split(r'(\d+)', text)]
+            audio_files.sort(key=natural_keys)
+
+            total = len(audio_files)
             if total == 0:
-                self.error.emit("❌ 이미지 폴더가 비어있습니다.")
+                self.error.emit("❌ 오디오 폴더에 mp3 파일이 없습니다.")
                 return
 
             # 병렬 처리를 위한 작업 리스트 생성
             tasks = []
-            for i, img_name in enumerate(img_files):
-                base_name = os.path.splitext(img_name)[0]
-                audio_name = base_name + ".mp3"
+            valid_exts = ['.png', '.jpg', '.jpeg', '.webp']
+            
+            for i, audio_name in enumerate(audio_files):
+                base_name = os.path.splitext(audio_name)[0]
                 audio_path = os.path.join(self.audio_dir, audio_name)
                 
-                if not os.path.exists(audio_path):
-                    self.log_signal.emit(f"⚠️ 오디오 없음 스킵: {audio_name}")
+                # 대응하는 이미지 찾기
+                img_path = None
+                found_img_name = None
+                
+                # 1. 같은 이름의 이미지 검색
+                for ext in valid_exts:
+                    check_path = os.path.join(self.image_dir, base_name + ext)
+                    if os.path.exists(check_path):
+                        img_path = check_path
+                        found_img_name = base_name + ext
+                        break
+                
+                if not img_path:
+                    self.log_signal.emit(f"⚠️ 이미지 없음 스킵: {base_name} (오디오 기준 처리 중)")
                     continue
                 
-                img_path = os.path.join(self.image_dir, img_name)
                 output_path = os.path.join(self.output_dir, base_name + ".mp4")
                 
                 # 랜덤 효과 설정 생성
@@ -787,6 +1148,14 @@ class VideoMergerWorker(QThread):
             for tmp in temp_files:
                 try: os.remove(tmp)
                 except: pass
+            
+            # temp_subs 폴더 삭제
+            try:
+                temp_subs_dir = os.path.join(os.path.dirname(output_path), "temp_subs")
+                if os.path.exists(temp_subs_dir):
+                    os.rmdir(temp_subs_dir)
+            except:
+                pass
             
             return True
 
@@ -1715,6 +2084,7 @@ class MainApp(QWidget):
         super().__init__()
         self.driver = None
         self.start_time_gen = 0
+        self.start_time_nano = 0
         self.start_time_fx = 0
         self.loaded_items = []
         self.current_file_path = ""
@@ -1758,6 +2128,11 @@ class MainApp(QWidget):
         self.tab1 = QWidget()
         self.initTab1()
         self.tabs.addTab(self.tab1, "GenSpark Image")
+
+        # 탭 1-3: NanoBanana Image (Added next to GenSpark)
+        self.tab_nano = QWidget()
+        self.initTabNanoBanana()
+        self.tabs.addTab(self.tab_nano, "NanoBanana Image")
 
         # 탭 1-2: ImageFX Image
         self.tab_fx = QWidget()
@@ -1871,6 +2246,76 @@ class MainApp(QWidget):
         layout.addWidget(self.log_display)
 
         self.tab1.setLayout(layout)
+
+    def initTabNanoBanana(self):
+        layout = QVBoxLayout()
+
+        self.nano_status_label = QLabel("1단계: NanoBanana 브라우저를 먼저 준비해 주세요.")
+        self.nano_status_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #D4D4D4;")
+        layout.addWidget(self.nano_status_label)
+
+        self.nano_timer_label = QLabel("소요 시간: 00:00:00")
+        layout.addWidget(self.nano_timer_label)
+
+        # 저장 경로 설정
+        path_layout = QHBoxLayout()
+        self.nano_image_path_edit = QLineEdit(r"D:\youtube")
+        self.nano_image_path_edit.setStyleSheet("background-color: #2D2D2D; color: #D4D4D4; height: 25px;")
+        btn_browse_image = QPushButton("찾아보기")
+        btn_browse_image.clicked.connect(lambda: self.browse_image_path_custom(self.nano_image_path_edit))
+        path_layout.addWidget(QLabel("저장 폴더:"))
+        path_layout.addWidget(self.nano_image_path_edit)
+        path_layout.addWidget(btn_browse_image)
+        layout.addLayout(path_layout)
+
+        # 버튼들
+        self.btn_nano_prepare = QPushButton("🌐 1. NanoBanana 브라우저 및 탭 준비")
+        self.btn_nano_prepare.setStyleSheet("height: 50px; font-weight: bold; background-color: #673AB7; color: white; border-radius: 8px;")
+        self.btn_nano_prepare.clicked.connect(self.launch_browser_nanobanana)
+        layout.addWidget(self.btn_nano_prepare)
+
+        # 텍스트 입력창 추가
+        layout.addWidget(QLabel("이미지 프롬프트 입력:"))
+        self.nano_prompt_input = QTextEdit()
+        self.nano_prompt_input.setPlaceholderText("프롬프트 내용을 입력하세요.\n1. 프롬프트1\n2. 프롬프트2")
+        self.nano_prompt_input.setStyleSheet("background-color: #1E1E1E; color: #D4D4D4;")
+        layout.addWidget(self.nano_prompt_input)
+
+        btn_h_layout = QHBoxLayout()
+        self.btn_nano_start = QPushButton("🚀 2. NanoBanana 이미지 생성 시작")
+        self.btn_nano_start.setEnabled(True)
+        self.btn_nano_start.setStyleSheet("""
+            QPushButton { height: 50px; font-weight: bold; background-color: #28a745; color: white; border-radius: 8px; }
+            QPushButton:disabled { background-color: #6c757d; }
+        """)
+        self.btn_nano_start.clicked.connect(self.start_automation_nanobanana)
+        
+        self.btn_nano_stop = QPushButton("🛑 중지")
+        self.btn_nano_stop.setEnabled(False)
+        self.btn_nano_stop.setStyleSheet("""
+            QPushButton { height: 50px; font-weight: bold; background-color: #dc3545; color: white; border-radius: 8px; }
+            QPushButton:disabled { background-color: #6c757d; }
+        """)
+        self.btn_nano_stop.clicked.connect(self.stop_automation_nanobanana)
+
+        btn_h_layout.addWidget(self.btn_nano_start)
+        btn_h_layout.addWidget(self.btn_nano_stop)
+        layout.addLayout(btn_h_layout)
+
+        # 압축 버튼 추가
+        self.btn_nano_compress = QPushButton("🗜️ 3. 이미지 압축 (용량 줄이기)")
+        self.btn_nano_compress.setStyleSheet("height: 50px; font-weight: bold; background-color: #FF9800; color: white; border-radius: 8px; margin-top: 5px;")
+        self.btn_nano_compress.clicked.connect(lambda: self.compress_images_custom(self.nano_image_path_edit, self.nano_log_display))
+        layout.addWidget(self.btn_nano_compress)
+
+        # 로그 디스플레이
+        self.nano_log_display = QTextEdit()
+        self.nano_log_display.setReadOnly(True)
+        self.nano_log_display.setStyleSheet("background-color: #1E1E1E; color: #D4D4D4; font-family: 'Consolas', 'Malgun Gothic';")
+        self.nano_log_display.setMaximumHeight(150)
+        layout.addWidget(self.nano_log_display)
+
+        self.tab_nano.setLayout(layout)
 
     def initTabImageFX(self):
         layout = QVBoxLayout()
@@ -2612,8 +3057,8 @@ class MainApp(QWidget):
             use_random_effects=use_random
         )
         self.merger_worker.log_signal.connect(self.video_log.append)
-        self.merger_worker.finished.connect(self.on_merge_finished)
-        self.merger_worker.error.connect(self.on_worker_error)
+        self.merger_worker.finished.connect(self.on_video_merge_finished)
+        self.merger_worker.error.connect(self.on_error)
         
         self.set_btn_enable(False)
         self.merger_worker.start()
@@ -2727,11 +3172,50 @@ class MainApp(QWidget):
             line = line.strip()
             if not line: continue
             
-            # Skip major group headers like "1. {}"
+            # Skip major group headers like "1. {}" ONLY if it looks like a pure header lines
+            # If the user put "86.{} 86-1 원본: ..." on one line, we should NOT skip it.
             if re.match(r'^\d+\.\s*\{.*\}', line):
-                continue
-                
-            # Check for ID line like "1-1", "2-1"
+                # If it contains actual content markers, process it. Otherwise skip.
+                if "원본:" not in line and "TTS:" not in line:
+                    continue
+            
+            # 1. 한 줄 포맷 처리: "1-1 원본: ... TTS: ..."
+            # 대소문자 구분 없이 처리하기 위해 lower() 검사, 그러나 값은 유지
+            if "원본:" in line and "TTS:" in line:
+                # 헤더(86.{})가 앞에 붙어있을 수 있으므로 match -> search로 변경
+                # 또한 ID 뒤에 공백이나 문자가 바로 올 수 있음
+                id_match = re.search(r'(\d+)-(\d+)', line)
+                if id_match:
+                    major_id = id_match.group(1)
+                    
+                    # TTS: 기준으로 분리
+                    try:
+                        # rsplit 대신 split 사용하되, 원본 내에 TTS: 가 들어갈 일은 적다고 가정
+                        # 안전하게 정규식 split 사용
+                        parts = re.split(r'\s*TTS:\s*', line, maxsplit=1)
+                        if len(parts) == 2:
+                            left_part = parts[0] # "1-1 원본: 내용 ,"
+                            tts_text = parts[1].strip() # "발음 내용"
+                            
+                            if left_part.endswith(','): left_part = left_part[:-1]
+                            if tts_text.endswith(','): tts_text = tts_text[:-1]
+                            
+                            # left_part에서 "원본:" 분리
+                            val_parts = left_part.split("원본:", 1)
+                            if len(val_parts) == 2:
+                                original_text = val_parts[1].strip()
+                                if original_text.endswith(','): original_text = original_text[:-1]
+                                
+                                subs[major_id].append({
+                                    "original": original_text.strip(),
+                                    "tts": tts_text.strip()
+                                })
+                                continue
+                    except:
+                        pass
+
+            # 2. 기존 멀티라인 로직 유지
+            # Check for ID line like "1-1", "2-1" only if strictly regex matched
             id_match = re.match(r'^(\d+)-(\d+)$', line)
             if id_match:
                 current_id = id_match.group(1)
@@ -2743,13 +3227,16 @@ class MainApp(QWidget):
             elif line.startswith("TTS:"):
                 current_item["tts"] = line[len("TTS:"):].strip()
                 if current_id:
-                    # If original is missing, use TTS as original
                     if not current_item["original"]:
                         current_item["original"] = current_item["tts"]
                     subs[current_id].append(dict(current_item))
                     current_item = {"original": "", "tts": ""}
             else:
-                # Fallback for old format: "1-1 content"
+                # Fallback for old simple format: "1-1 content" (no 원본/TTS keywords)
+                # 단, 위에서 처리된 한 줄 포맷(원본/TTS 포함)은 여기 오면 안됨 (continue 처리됨)
+                if "원본:" in line or "TTS:" in line:
+                    continue # 키워드가 있는데 위에서 처리가 안된건 형식이 깨진 것이므로 무시하거나 로그
+                    
                 match = re.match(r'^(\d+)-\d+\.?\s*(.*)', line)
                 if match:
                     major_id = match.group(1)
@@ -3019,6 +3506,36 @@ class MainApp(QWidget):
             self.log_display.append(f"❌ 브라우저 실행 오류: {e}")
             self.status_label.setText("오류 발생 (로그 확인)")
 
+    def launch_browser_nanobanana(self):
+        try:
+            self.nano_log_display.append("🌐 NanoBanana 브라우저를 실행합니다...")
+            chrome_cmd = r'C:\Program Files\Google\Chrome\Application\chrome.exe'
+            user_data = r'C:\sel_chrome_nano'
+            target_url = "https://gemini.google.com/app?hl=ko" 
+            
+            if not os.path.exists(user_data):
+                os.makedirs(user_data)
+                
+            subprocess.Popen([chrome_cmd, '--remote-debugging-port=9224', f'--user-data-dir={user_data}', target_url])
+            
+            # Wait for browser to open
+            time.sleep(3)
+            
+            opt = Options()
+            opt.add_experimental_option("debuggerAddress", "127.0.0.1:9224")
+            self.driver_nano = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opt)
+            
+            # Ensure 2 tabs
+            if len(self.driver_nano.window_handles) < 2:
+                self.driver_nano.execute_script(f"window.open('{target_url}');")
+                
+            self.nano_log_display.append("✅ NanoBanana 브라우저 연결 성공. 두 개의 탭을 확인하세요.")
+            self.nano_status_label.setText("2단계: 프롬프트 입력 후 시작 버튼을 누르세요.")
+            
+        except Exception as e:
+            self.nano_log_display.append(f"❌ 브라우저 실행 오류: {e}")
+            self.nano_status_label.setText("오류 발생 (로그 확인)")
+
     def launch_browser_imagefx(self):
         try:
             self.fx_log_display.append("🌐 ImageFX용 브라우저를 실행합니다...")
@@ -3150,12 +3667,15 @@ class MainApp(QWidget):
             if hasattr(self, 'timer_label'):
                 self.timer_label.setText(f"소요 시간: {h:02d}:{m:02d}:{s:02d}")
         
-        # ImageFX Timer
-        if hasattr(self, 'start_time_fx') and self.start_time_fx > 0:
-            elapsed = int(now - self.start_time_fx)
-            h, m, s = elapsed // 3600, (elapsed % 3600) // 60, elapsed % 60
             if hasattr(self, 'fx_timer_label'):
                 self.fx_timer_label.setText(f"소요 시간: {h:02d}:{m:02d}:{s:02d}")
+
+        # NanoBanana Timer
+        if hasattr(self, 'start_time_nano') and self.start_time_nano > 0:
+            elapsed = int(now - self.start_time_nano)
+            h, m, s = elapsed // 3600, (elapsed % 3600) // 60, elapsed % 60
+            if hasattr(self, 'nano_timer_label'):
+                self.nano_timer_label.setText(f"소요 시간: {h:02d}:{m:02d}:{s:02d}")
 
     def start_automation(self):
         if not self.driver:
@@ -3215,10 +3735,78 @@ class MainApp(QWidget):
         self.log_display.append(f"❗ 오류: {err}")
 
     def stop_automation(self):
-        if hasattr(self, 'worker') and self.worker.isRunning():
-            self.worker.stop()
             self.log_display.append("🛑 중지 요청 중... (현재 작업 완료 후 중단됩니다)")
             self.btn_stop.setEnabled(False)
+
+    def start_automation_nanobanana(self):
+        if not hasattr(self, 'driver_nano') or not self.driver_nano:
+            self.nano_log_display.append("❌ 브라우저가 준비되지 않았습니다.")
+            return
+        
+        text = self.nano_prompt_input.toPlainText().strip()
+        if not text:
+            self.nano_log_display.append("❌ 입력된 프롬프트가 없습니다.")
+            return
+
+        # 프롬프트 파싱: (\d+)\s*\.\s*\{(.*?)\}
+        loaded_items = re.findall(r'(\d+)\s*\.\s*\{(.*?)\}', text, re.DOTALL)
+        
+        if not loaded_items:
+            # Fallback for old format
+            loaded_items = []
+            for line in text.split('\n'):
+                match = re.match(r'^(\d+(?:-\d+)?)\.?\s*(.*)', line.strip())
+                if match:
+                    loaded_items.append((match.group(1), match.group(2)))
+
+        if not loaded_items:
+            self.nano_log_display.append("❌ 프롬프트 형식이 올바르지 않습니다 (예: 1. {프롬프트})")
+            return
+
+        self.btn_nano_start.setEnabled(False)
+        self.btn_nano_stop.setEnabled(True)
+        self.start_time_nano = time.time()
+        if not self.ui_timer.isActive():
+            self.ui_timer.start(1000) 
+        
+        file_path = "nano_" + time.strftime("%H%M%S")
+        image_target = self.nano_image_path_edit.text().strip()
+        
+        self.worker_nano = NanoBananaMultiTabWorker(file_path, loaded_items, self.driver_nano, custom_target_dir=image_target)
+        self.worker_nano.progress.connect(self.nano_status_label.setText)
+        self.worker_nano.log_signal.connect(lambda m: self.nano_log_display.append(m))
+        self.worker_nano.finished.connect(self.on_success_nano)
+        self.worker_nano.error.connect(self.on_error_nano)
+        self.worker_nano.start()
+
+    def on_success_nano(self, msg, elapsed):
+        self.start_time_nano = 0
+        if self.start_time_gen == 0 and self.start_time_fx == 0:
+            self.ui_timer.stop()
+            
+        self.btn_nano_start.setEnabled(True)
+        self.btn_nano_stop.setEnabled(False)
+        self.nano_log_display.append(f"🏁 {msg}")
+        
+        # 생성 완료 후 자동 압축 실행
+        if hasattr(self, 'worker_nano') and self.worker_nano.target_dir:
+            self.nano_log_display.append("🔄 생성 완료: 자동 압축(JPG 변환)을 시작합니다...")
+            self.compress_images(dir_path=self.worker_nano.target_dir)
+
+    def on_error_nano(self, err):
+        self.start_time_nano = 0
+        if self.start_time_gen == 0 and self.start_time_fx == 0:
+            self.ui_timer.stop()
+            
+        self.btn_nano_start.setEnabled(True)
+        self.btn_nano_stop.setEnabled(False)
+        self.nano_log_display.append(f"❗ 오류: {err}")
+
+    def stop_automation_nanobanana(self):
+        if hasattr(self, 'worker_nano') and self.worker_nano.isRunning():
+            self.worker_nano.stop()
+            self.nano_log_display.append("🛑 중지 요청 중... (현재 작업 완료 후 중단됩니다)")
+            self.btn_nano_stop.setEnabled(False)
 
     def compress_images(self, dir_path=None):
         if not dir_path:
