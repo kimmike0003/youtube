@@ -4,7 +4,6 @@ import urllib.request
 import urllib.parse
 import json
 from datetime import datetime, timedelta
-import re
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtGui import QPixmap, QImage
 
@@ -82,7 +81,7 @@ class YoutubeSearchWorker(QThread):
             if video_ids:
                 # Video IDs are unique per item, max 50
                 v_params = {
-                    'part': 'snippet,statistics,contentDetails',
+                    'part': 'snippet,statistics',
                     'id': ','.join(video_ids),
                     'key': self.api_key
                 }
@@ -103,25 +102,6 @@ class YoutubeSearchWorker(QThread):
                 # Safely get nested keys
                 v_snip = v_detail.get('snippet', {})
                 v_stat = v_detail.get('statistics', {})
-                v_content = v_detail.get('contentDetails', {})
-                
-                # Parse Duration
-                duration_iso = v_content.get('duration', '')
-                duration_str = "-"
-                duration_sec = 0
-                if duration_iso:
-                    # P1DT1H1M1S -> Regex parsing
-                    match = re.match(r'PT((?P<hours>\d+)H)?((?P<minutes>\d+)M)?((?P<seconds>\d+)S)?', duration_iso)
-                    if match:
-                        h = int(match.group('hours') or 0)
-                        m = int(match.group('minutes') or 0)
-                        s = int(match.group('seconds') or 0)
-                        duration_sec = h * 3600 + m * 60 + s
-                        
-                        if h > 0:
-                            duration_str = f"{h:02d}:{m:02d}:{s:02d}"
-                        else:
-                            duration_str = f"{m:02d}:{s:02d}"
                 c_snip = c_detail.get('snippet', {})
                 c_stat = c_detail.get('statistics', {})
                 
@@ -143,13 +123,7 @@ class YoutubeSearchWorker(QThread):
                     'lang': v_snip.get('defaultLanguage', '-'),
                     'audio_lang': v_snip.get('defaultAudioLanguage', '-'),
                     'country': c_snip.get('country', '-'),
-                    'video_total': int(c_stat.get('videoCount', 0)),
-                    'lang': v_snip.get('defaultLanguage', '-'),
-                    'audio_lang': v_snip.get('defaultAudioLanguage', '-'),
-                    'country': c_snip.get('country', '-'),
-                    'published_at': item['snippet']['publishedAt'],
-                    'duration_str': duration_str,
-                    'duration_sec': duration_sec
+                    'published_at': item['snippet']['publishedAt']
                 }
                 results.append(row)
             
