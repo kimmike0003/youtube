@@ -4725,57 +4725,114 @@ class FTPUploadWorker(QThread):
         self.local_dir = local_dir
         self.remote_dir = remote_dir
         
+
+
     def run(self):
         ftp = None
         try:
             self.log_signal.emit(f"🔌 연결 중: {self.host}:{self.port}")
             ftp = ftplib.FTP()
+            ftp.encoding = 'utf-8' # 한글 경로 지원을 위해 UTF-8 설정
             ftp.connect(self.host, self.port, timeout=30)
             ftp.login(self.user, self.passwd)
             self.log_signal.emit("✅ 로그인 성공")
             
-            # Create/Chdir Remote Dir
-            try:
-                ftp.cwd(self.remote_dir)
-                self.log_signal.emit(f"📂 서버 경로 이동: {self.remote_dir}")
-            except ftplib.error_perm:
-                self.log_signal.emit(f"📂 경로가 없어 생성을 시도합니다: {self.remote_dir}")
-                try:
-                    ftp.mkd(self.remote_dir)
-                    ftp.cwd(self.remote_dir)
-                    self.log_signal.emit("✅ 경로 생성 및 이동 완료")
-                except Exception as e:
-                    self.error.emit(f"경로 생성 실패: {e}")
-                    ftp.quit()
-                    return
+            # Base Remote Dir Ensure
+            # self.remote_dir 경로가 없을 수도 있고, 여러 계단일 수도 있음.
+            # 가장 안전한 방법: 루트부터 하나씩 이동/생성
+            # 하지만 간단히: cwd 시도 -> 실패시 mkd 시도 (단, 재귀적 생성함수 사용 권장)
+            
+            if not self.ensure_remote_dir(ftp, self.remote_dir):
+                self.error.emit(f"서버 경로 이동/생성 실패: {self.remote_dir}")
+                ftp.quit()
+                return
+            
+            self.log_signal.emit(f"📂 작업 폴더 준비 완료: {self.remote_dir}")
 
-            # Upload Files
-            files = os.listdir(self.local_dir)
-            files = [f for f in files if os.path.isfile(os.path.join(self.local_dir, f))]
+            # Walk Local Directory
+            total_uploaded = 0
             
-            total = len(files)
-            success = 0
-            
-            for i, filename in enumerate(files):
-                local_path = os.path.join(self.local_dir, filename)
-                self.log_signal.emit(f"⬆️ [{i+1}/{total}] 업로드 중: {filename}")
+            for root, dirs, files in os.walk(self.local_dir):
+                # Calculate current remote path
+                rel_path = os.path.relpath(root, self.local_dir)
                 
-                with open(local_path, "rb") as f:
+                if rel_path == '.':
+                    current_remote = self.remote_dir
+                else:
+                    # Windows path separator(\) to FTP standard(/)
+                    normalized_rel = rel_path.replace(os.sep, '/')
+                    current_remote = f"{self.remote_dir}/{normalized_rel}"
+                    # Check/Create subdirectory
+                    if not self.ensure_remote_dir(ftp, current_remote):
+                        self.log_signal.emit(f"   ⚠️ 폴더 생성 실패, 건너뜀: {current_remote}")
+                        continue
+                
+                # CWD to current remote (just to be safe, or use full path in stor?)
+                # storbinary with relative filename usually puts in CWD.
+                # So we CWD.
+                try:
+                    ftp.cwd(current_remote)
+                except Exception as e:
+                    self.log_signal.emit(f"   ⚠️ 폴더 이동 실패: {current_remote} ({e})")
+                    continue
+
+                for filename in files:
+                    local_file_path = os.path.join(root, filename)
+                    self.log_signal.emit(f"⬆️ 업로드 중: {filename}")
+                    
                     try:
-                        ftp.storbinary(f"STOR {filename}", f)
-                        success += 1
-                        # self.log_signal.emit(f"   ✅ 완료")
+                        with open(local_file_path, "rb") as f:
+                            ftp.storbinary(f"STOR {filename}", f)
+                            total_uploaded += 1
                     except Exception as e:
                         self.log_signal.emit(f"   ❌ 실패: {filename} ({e})")
             
             ftp.quit()
-            self.finished.emit(f"업로드 완료 ({success}/{total} 파일)")
+            self.finished.emit(f"전체 업로드 완료 (총 {total_uploaded}개 파일)")
             
         except Exception as e:
             self.error.emit(f"FTP 오류: {e}")
             if ftp:
                 try: ftp.quit()
                 except: pass
+
+    def ensure_remote_dir(self, ftp, path):
+        """
+        경로가 존재하면 True, 없으면 생성 후 True, 실패 시 False
+        계층적 경로 생성 지원 (예: /a/b/c)
+        """
+        # 절대 경로 처리를 위해 시작점 초기화
+        original_cwd = ftp.pwd()
+        
+        try:
+            ftp.cwd(path)
+            # 이미 존재함
+            return True
+        except ftplib.error_perm:
+            pass # 생성 필요
+        
+        # 다시 원래 위치로 (혹시 cwd 실패하며 이상한데 갔을까봐)
+        # 하지만 error_perm이면 이동 안했을 것임.
+        
+        # 계층적 생성 시도
+        parts = [p for p in path.replace('\\', '/').split('/') if p]
+        
+        # 시작 위치 잡기
+        if path.startswith('/'):
+            ftp.cwd('/') # 루트에서 시작
+            
+        for part in parts:
+            try:
+                ftp.cwd(part)
+            except ftplib.error_perm:
+                try:
+                    ftp.mkd(part)
+                    ftp.cwd(part)
+                except Exception as e:
+                    # print(f"MKD Fail: {part} in {ftp.pwd()} >> {e}")
+                    return False
+        
+        return True
 
 class FTPLoginWorker(QThread):
     log_signal = pyqtSignal(str)
