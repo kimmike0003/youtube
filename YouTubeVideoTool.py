@@ -4,6 +4,7 @@ import subprocess
 import os
 import collections
 import base64
+import ftplib
 import traceback
 import webbrowser  # Added for opening URLs
 try:
@@ -377,128 +378,179 @@ class NanoBananaMultiTabWorker(QThread):
                     try:
                         driver.execute_script("arguments[0].click();", img)
                         
-                        best_img = None
-                        max_area = 0
-                        
-                        # Polling for high-res load (up to 10 seconds)
-                        for _ in range(10):
-                            time.sleep(1.0)
-                            
-                            current_imgs = driver.find_elements(By.TAG_NAME, 'img')
-                            best_img_candidate = None
-                            max_area_candidate = 0
-                            
-                            for m_img in current_imgs:
-                                try:
-                                    mw = int(m_img.get_attribute('naturalWidth') or 0)
-                                    mh = int(m_img.get_attribute('naturalHeight') or 0)
-                                    
-                                    if mw > 600 and (mw * mh > max_area_candidate):
-                                        max_area_candidate = mw * mh
-                                        best_img_candidate = m_img
-                                except:
-                                    continue
-                            
-                            
-                            if best_img_candidate:
-                                best_img = best_img_candidate
-                                max_area = max_area_candidate
-                                if best_img.is_displayed():
-                                    break
-                                else:
-                                    best_img = None
-                        
                         result_data = None
                         
-                        if best_img:
-                            src = best_img.get_attribute('src')
+                        # 0. Try "Download Original" Button (Click & Monitor Downloads)
+                        # User Requested: Download via specific button to get original quality
+                        try:
+                            # Wait for button to appear (Short timeout)
+                            dl_wait = WebDriverWait(driver, 5)
+                            dl_btn = dl_wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[aria-label='원본 크기 이미지 다운로드']")))
                             
-                            # 1. Python Requests로 직접 다운로드 (가장 강력함 - 원본 파일 그대로 저장)
-                            if not result_data:
+                            # Prepare file monitoring
+                            user_home = os.path.expanduser("~")
+                            download_dir = os.path.join(user_home, "Downloads")
+                            
+                            before_files = set(os.listdir(download_dir))
+                            
+                            # Click
+                            driver.execute_script("arguments[0].click();", dl_btn)
+                            # self.log_signal.emit("  ⬇️ 원본 다운로드 버튼 클릭 완료, 파일 대기 중...")
+                            
+                            # Monitor for new file (30s timeout)
+                            found_file = None
+                            for _ in range(30):
+                                time.sleep(1)
                                 try:
-                                    session = requests.Session()
-                                    # Selenium 쿠키 복사
-                                    cookies = driver.get_cookies()
-                                    for cookie in cookies:
-                                        session.cookies.set(cookie['name'], cookie['value'])
+                                    current_files = set(os.listdir(download_dir))
+                                    new_files = current_files - before_files
                                     
-                                    headers = {
-                                        "User-Agent": driver.execute_script("return navigator.userAgent;")
-                                    }
-                                    
-                                    resp = session.get(src, headers=headers, timeout=15)
-                                    if resp.status_code == 200:
-                                        result_data = base64.b64encode(resp.content).decode('utf-8')
-                                        self.log_signal.emit("  📸 Requests로 원본 다운로드 성공")
-                                except Exception as e:
-                                    # self.log_signal.emit(f"  ⚠️ Requests 실패: {e}")
+                                    valid_candidates = [f for f in new_files if not f.endswith('.crdownload') and not f.endswith('.tmp')]
+                                    if valid_candidates:
+                                        found_file = os.path.join(download_dir, valid_candidates[0])
+                                        
+                                        # Wait for download to finish (size > 0 and stable)
+                                        if os.path.getsize(found_file) > 0:
+                                            time.sleep(1) # Ensure flush
+                                            break
+                                except:
                                     pass
+                            
+                            if found_file:
+                                with open(found_file, "rb") as f:
+                                    raw_bytes = f.read()
+                                result_data = base64.b64encode(raw_bytes).decode('utf-8')
+                                self.log_signal.emit(f"  📸 원본 버튼으로 다운로드 성공 ({len(raw_bytes)/1024:.1f} KB)")
+                                
+                                # Cleanup
+                                try: os.remove(found_file)
+                                except: pass
+                                
+                        except Exception as e_dl:
+                             # self.log_signal.emit(f"  ⚠️ 다운로드 버튼 스킵/실패: {e_dl}")
+                             pass
 
-                            # 2. Fetch API (JS) 백업
-                            if not result_data:
-                                try:
-                                    script = """
-                                    var callback = arguments[arguments.length - 1];
-                                    var img = arguments[0];
-                                    var src = img.src;
-                                    
-                                    fetch(src)
-                                        .then(response => response.blob())
-                                        .then(blob => {
-                                            var reader = new FileReader();
-                                            reader.onloadend = function() {
-                                                callback(reader.result.split(',')[1]);
-                                            }
-                                            reader.readAsDataURL(blob);
-                                        })
-                                        .catch(err => {
-                                            callback(null);
-                                        });
-                                    """
-                                    result_data = driver.execute_async_script(script, best_img)
-                                    if result_data:
-                                        self.log_signal.emit("  📸 Fetch API로 원본 다운로드 성공")
-                                except:
-                                    pass
-                            
-                            # 3. 새 탭 열기 백업
-                            if not result_data:
-                                try:
-                                    current_handle = driver.current_window_handle
-                                    driver.execute_script("window.open(arguments[0], '_blank');", src)
-                                    time.sleep(2.0)
-                                    driver.switch_to.window(driver.window_handles[-1])
-                                    full_img = driver.find_element(By.TAG_NAME, 'img')
-                                    result_data = full_img.screenshot_as_base64
-                                    driver.close()
-                                    driver.switch_to.window(current_handle)
-                                    self.log_signal.emit("  📸 새 탭 열기로 캡처 성공")
-                                except:
-                                    try:
-                                        if len(driver.window_handles) > 2: driver.close()
-                                        driver.switch_to.window(current_handle)
-                                    except: pass
-                        
-                        # 4. 고해상도 실패 시 썸네일이라도 저장 (Fallback)
                         if not result_data:
-                            self.log_signal.emit(f"  ⚠️ 고해상도 실패 -> 썸네일 안전 캡처 시도")
-                            # 썸네일이 화면 밖으로 나가지 않게 스타일 강제 조정
-                            try:
-                                driver.execute_script("""
-                                    arguments[0].style.position = 'fixed';
-                                    arguments[0].style.top = '50%';
-                                    arguments[0].style.left = '50%';
-                                    arguments[0].style.transform = 'translate(-50%, -50%)';
-                                    arguments[0].style.maxWidth = '90vw';
-                                    arguments[0].style.maxHeight = '90vh';
-                                    arguments[0].style.objectFit = 'contain';
-                                    arguments[0].style.zIndex = '99999';
-                                    arguments[0].style.backgroundColor = 'black';
-                                """, img)
-                                time.sleep(0.5)
-                                result_data = img.screenshot_as_base64
-                            except:
-                                result_data = img.screenshot_as_base64 # 진짜 최후의 수단
+                            best_img = None
+                            max_area = 0
+                            
+                            # Polling for high-res load (up to 10 seconds)
+                            for _ in range(10):
+                                time.sleep(1.0)
+                                
+                                current_imgs = driver.find_elements(By.TAG_NAME, 'img')
+                                best_img_candidate = None
+                                max_area_candidate = 0
+                                
+                                for m_img in current_imgs:
+                                    try:
+                                        mw = int(m_img.get_attribute('naturalWidth') or 0)
+                                        mh = int(m_img.get_attribute('naturalHeight') or 0)
+                                        
+                                        if mw > 600 and (mw * mh > max_area_candidate):
+                                            max_area_candidate = mw * mh
+                                            best_img_candidate = m_img
+                                    except:
+                                        continue
+                                
+                                
+                                if best_img_candidate:
+                                    best_img = best_img_candidate
+                                    max_area = max_area_candidate
+                                    if best_img.is_displayed():
+                                        break
+                                    else:
+                                        best_img = None
+                            
+                            if best_img:
+                                src = best_img.get_attribute('src')
+                                
+                                # 1. Python Requests로 직접 다운로드 (가장 강력함 - 원본 파일 그대로 저장)
+                                if not result_data:
+                                    try:
+                                        session = requests.Session()
+                                        # Selenium 쿠키 복사
+                                        cookies = driver.get_cookies()
+                                        for cookie in cookies:
+                                            session.cookies.set(cookie['name'], cookie['value'])
+                                        
+                                        headers = {
+                                            "User-Agent": driver.execute_script("return navigator.userAgent;")
+                                        }
+                                        
+                                        resp = session.get(src, headers=headers, timeout=15)
+                                        if resp.status_code == 200:
+                                            result_data = base64.b64encode(resp.content).decode('utf-8')
+                                            self.log_signal.emit("  📸 Requests로 원본 다운로드 성공")
+                                    except Exception as e:
+                                        # self.log_signal.emit(f"  ⚠️ Requests 실패: {e}")
+                                        pass
+
+                                # 2. Fetch API (JS) 백업
+                                if not result_data:
+                                    try:
+                                        script = """
+                                        var callback = arguments[arguments.length - 1];
+                                        var img = arguments[0];
+                                        var src = img.src;
+                                        
+                                        fetch(src)
+                                            .then(response => response.blob())
+                                            .then(blob => {
+                                                var reader = new FileReader();
+                                                reader.onloadend = function() {
+                                                    callback(reader.result.split(',')[1]);
+                                                }
+                                                reader.readAsDataURL(blob);
+                                            })
+                                            .catch(err => {
+                                                callback(null);
+                                            });
+                                        """
+                                        result_data = driver.execute_async_script(script, best_img)
+                                        if result_data:
+                                            self.log_signal.emit("  📸 Fetch API로 원본 다운로드 성공")
+                                    except:
+                                        pass
+                                
+                                # 3. 새 탭 열기 백업
+                                if not result_data:
+                                    try:
+                                        current_handle = driver.current_window_handle
+                                        driver.execute_script("window.open(arguments[0], '_blank');", src)
+                                        time.sleep(2.0)
+                                        driver.switch_to.window(driver.window_handles[-1])
+                                        full_img = driver.find_element(By.TAG_NAME, 'img')
+                                        result_data = full_img.screenshot_as_base64
+                                        driver.close()
+                                        driver.switch_to.window(current_handle)
+                                        self.log_signal.emit("  📸 새 탭 열기로 캡처 성공")
+                                    except:
+                                        try:
+                                            if len(driver.window_handles) > 2: driver.close()
+                                            driver.switch_to.window(current_handle)
+                                        except: pass
+                            
+                            # 4. 고해상도 실패 시 썸네일이라도 저장 (Fallback)
+                            if not result_data:
+                                self.log_signal.emit(f"  ⚠️ 고해상도 실패 -> 썸네일 안전 캡처 시도")
+                                # 썸네일이 화면 밖으로 나가지 않게 스타일 강제 조정
+                                try:
+                                    driver.execute_script("""
+                                        arguments[0].style.position = 'fixed';
+                                        arguments[0].style.top = '50%';
+                                        arguments[0].style.left = '50%';
+                                        arguments[0].style.transform = 'translate(-50%, -50%)';
+                                        arguments[0].style.maxWidth = '90vw';
+                                        arguments[0].style.maxHeight = '90vh';
+                                        arguments[0].style.objectFit = 'contain';
+                                        arguments[0].style.zIndex = '99999';
+                                        arguments[0].style.backgroundColor = 'black';
+                                    """, img)
+                                    time.sleep(0.5)
+                                    result_data = img.screenshot_as_base64
+                                except:
+                                    result_data = img.screenshot_as_base64 # 진짜 최후의 수단
                         
                         # Close Lightbox (ESC)
                         try:
@@ -999,9 +1051,10 @@ class VideoMergerWorker(QThread):
             # We will use explicit logic:
             
             # A) 이미지 [0:v]를 고화질로 뻥튀기 (Zoom 대비, Lanczos)
-            #    최대 줌(예: 1.5배) 고려하여 넉넉하게 1.5배 or 4K로 업스케일
-            #    [Fix] fps=30 명시하여 zoompan의 d=1 설정과 프레임 수 동기화 (기존 25fps -> 30fps 불일치로 시간 단축 문제 해결)
-            filter_complex += f"[0:v]scale=3840:2160:flags=lanczos,setsar=1:1,fps={FPS}[v_high];"
+            #    떨림 방지를 위해 8K(7680x4320)로 업스케일링 (Supersampling)
+            #    [Fix] fps=30 명시
+            #    [Fix] Upscale시에는 bicubic이 ringing artifact가 적어 떨림이 덜해 보임
+            filter_complex += f"[0:v]scale=7680:4320:flags=bicubic,setsar=1:1,fps={FPS}[v_high];"
             
             # B) Zoom/Pan Expression
             # Default (No Effect): z=1
@@ -1017,8 +1070,9 @@ class VideoMergerWorker(QThread):
                 # [Fix] total_frames-1 로 나누어 마지막 프레임에서 정확히 end_scale 도달
                 denom = total_frames - 1 if total_frames > 1 else 1
                 z_expr = f"{start_scale}+({end_scale}-{start_scale})*on/{denom}"
-                x_expr = "iw/2-(iw/2/zoom)"
-                y_expr = "ih/2-(ih/2/zoom)"
+                # [Fix] Center Coordinate Calculation simplification
+                x_expr = "(iw-iw/zoom)/2"
+                y_expr = "(ih-ih/zoom)/2"
 
             elif effect_type == 2: # Pan Left -> Right
                 # Camera moves Left to Right -> Viewport moves Right to Left relative to image?
@@ -1072,9 +1126,9 @@ class VideoMergerWorker(QThread):
             # zoompan 필터에서 on은 'current input frame'이 아니라 'current output frame of the zoompan instance'임.
             # 입력이 동영상 스트림일 때 d=1이면 on도 매 프레임 증가함.
             
-            # 혹시 모르니 s=WxH를 명시하고, fps도 명시.
+            # [Fix] 8K Resolution for Supersampling
             filter_complex += (f"[v_high]zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':"
-                               f"d=1:s=3840x2160:fps={FPS}[v_zoomed];")
+                               f"d=1:s=7680x4320:fps={FPS}[v_zoomed];")
             
             # D) Downscale to Target (FHD) & Pad
             filter_complex += (f"[v_zoomed]scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=decrease:flags=lanczos,"
@@ -1863,6 +1917,87 @@ class VideoDubbingWorker(VideoMergerWorker):
             import traceback
             traceback.print_exc()
 
+class BatchDubbingWorker(QThread):
+    log_signal = pyqtSignal(str)
+    finished = pyqtSignal(str, float)
+    error = pyqtSignal(str)
+
+    def __init__(self, input_dir, style=None, volume=1.0):
+        super().__init__()
+        self.input_dir = input_dir
+        self.style = style
+        self.volume = volume
+
+    def run(self):
+        start_time = time.time()
+        try:
+            # 1. Output Dir 생성
+            output_dir = os.path.join(self.input_dir, "output")
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # 2. 동영상 파일 검색
+            if not os.path.exists(self.input_dir):
+                 self.error.emit("작업 폴더가 존재하지 않습니다.")
+                 return
+
+            all_files = os.listdir(self.input_dir)
+            video_files = [f for f in all_files if f.lower().endswith(('.mp4', '.avi', '.mkv', '.mov'))]
+            
+            # 자연스러운 정렬
+            video_files.sort(key=lambda s: [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', s)])
+            
+            if not video_files:
+                self.error.emit("작업 폴더에 동영상 파일이 없습니다.")
+                return
+
+            total = len(video_files)
+            success_count = 0
+            
+            self.log_signal.emit(f"📂 폴더: {self.input_dir}")
+            self.log_signal.emit(f"📂 출력: {output_dir}")
+            self.log_signal.emit(f"🔢 총 {total}개의 동영상 발견. 처리 시작...")
+
+            for idx, vid_name in enumerate(video_files):
+                base_name = os.path.splitext(vid_name)[0]
+                
+                # 경로 설정
+                video_path = os.path.join(self.input_dir, vid_name)
+                audio_path = os.path.join(self.input_dir, base_name + ".mp3") # 같은 이름의 mp3
+                output_path = os.path.join(output_dir, vid_name) # 출력 폴더에 같은 이름으로 저장 (확장자 유지)
+
+                if not os.path.exists(audio_path):
+                    self.log_signal.emit(f"⚠️ [{idx+1}/{total}] mp3 없음, 건너뜀: {vid_name}")
+                    continue
+                
+                self.log_signal.emit(f"▶ [{idx+1}/{total}] 처리 중: {vid_name}")
+
+                # 개별 Worker 로직 실행 (동기 호출)
+                # VideoDubbingWorker 인스턴스 생성
+                # style, volume 전달
+                worker = VideoDubbingWorker(video_path, audio_path, output_path, subtitles=None, style=self.style, volume=self.volume)
+                
+                # Signal Relay
+                worker.log_signal.connect(self.log_signal.emit)
+                
+                # 실행 (Blocking) - run() 직접 호출
+                try:
+                    worker.run()
+                    # worker.run() completes without exception if handled internally.
+                    # Output check
+                    if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                        success_count += 1
+                        # self.log_signal.emit(f"   ✅ 성공")
+                    else:
+                        pass # Error logged by worker
+                except Exception as ex:
+                    self.log_signal.emit(f"   ❌ 실행 오류: {ex}")
+            
+            elapsed = time.time() - start_time
+            self.finished.emit(f"일괄 작업 완료: {success_count}/{len(video_files)} 성공", elapsed)
+
+        except Exception as e:
+            self.error.emit(f"치명적 오류: {e}")
+
 # [참고] 기존 방식(VideoConcatenatorWorkerOld)은 각 파일마다 scale, pad 등 필터 문자열이 약 300자씩 추가되어
 # 130개 파일 기준 명령줄 길이가 40,000자를 초과하게 됩니다. (Windows 제한 32,767자)
 # 사용자의 파일 경로만 합치면 6,000자여도 필터 옵션 때문에 초과됩니다.
@@ -2204,7 +2339,12 @@ class MainApp(QWidget):
         self.initTabAudioNormal()
         self.tabs.addTab(self.tab_audio_normal, "Audio Normal")
 
-        # 탭 7: YouTube Analysis
+        # 탭 7 (New): FTP Upload
+        self.tab_ftp = QWidget()
+        self.initTabFTP()
+        self.tabs.addTab(self.tab_ftp, "FTP Upload")
+
+        # 탭 8: YouTube Analysis
         self.tab7 = QWidget()
         self.initTab7()
         self.tabs.addTab(self.tab7, "YouTube 분석")
@@ -2892,47 +3032,32 @@ class MainApp(QWidget):
     def initTab6(self):
         layout = QVBoxLayout()
         
-        # 파일 선택 그룹
-        file_group = QGroupBox("파일 선택")
+        # 안내 문구
+        layout.addWidget(QLabel("📢 배경 동영상과 같은 이름의 MP3를 찾아 자동으로 더빙 영상을 제작합니다."))
+        layout.addWidget(QLabel("   (자막 파일(.json)이 있으면 자동으로 포함됩니다.)"))
+
+        # 폴더 선택 그룹 (Batch Processing)
+        file_group = QGroupBox("폴더 선택 (일괄 처리)")
         file_layout = QGridLayout()
 
-        # 동영상 선택
-        self.dub_video_path = QLineEdit()
-        btn_browse_vid = QPushButton("배경 동영상 선택")
-        btn_browse_vid.clicked.connect(lambda: self.browse_single_file(self.dub_video_path, "Video Files (*.mp4 *.avi *.mkv *.mov)"))
-        file_layout.addWidget(QLabel("배경 동영상:"), 0, 0)
-        file_layout.addWidget(self.dub_video_path, 0, 1)
+        # 배경 동영상 폴더
+        self.dub_video_dir = QLineEdit()
+        self.dub_video_dir.setPlaceholderText("동영상(.mp4)과 오디오(.mp3)가 있는 폴더")
+        btn_browse_vid = QPushButton("배경 동영상 폴더 선택")
+        btn_browse_vid.clicked.connect(lambda: self.browse_folder(self.dub_video_dir))
+        
+        file_layout.addWidget(QLabel("작업 폴더:"), 0, 0)
+        file_layout.addWidget(self.dub_video_dir, 0, 1)
         file_layout.addWidget(btn_browse_vid, 0, 2)
 
-        # 오디오 선택
-        self.dub_audio_path = QLineEdit()
-        btn_browse_aud = QPushButton("음성(오디오) 선택")
-        btn_browse_aud.clicked.connect(lambda: self.browse_single_file(self.dub_audio_path, "Audio (*.mp3 *.wav)"))
-        file_layout.addWidget(QLabel("음성 파일:"), 1, 0)
-        file_layout.addWidget(self.dub_audio_path, 1, 1)
-        file_layout.addWidget(btn_browse_aud, 1, 2)
-
-        # 출력 선택
-        self.dub_output_path = QLineEdit()
-        btn_browse_out = QPushButton("저장 경로")
-        btn_browse_out.clicked.connect(lambda: self.browse_single_save_file(self.dub_output_path))
-        file_layout.addWidget(QLabel("출력 파일:"), 2, 0)
-        file_layout.addWidget(self.dub_output_path, 2, 1)
-        file_layout.addWidget(btn_browse_out, 2, 2)
-        
         file_group.setLayout(file_layout)
         layout.addWidget(file_group)
 
-        # 자막 관련 안내
-        note_label = QLabel("ℹ️ 자막은 오디오 파일(MP3)과 같은 이름의 .json 파일에서 자동으로 불러옵니다.\n   (ElevenLabs JSON 형식 지원)")
-        note_label.setStyleSheet("color: #008CBA; font-weight: bold; padding: 5px;")
-        layout.addWidget(note_label)
-        
         # 스타일 안내
         layout.addWidget(QLabel("ℹ️ 자막 스타일(폰트, 크기, 색상)은 'Video Composite' 탭의 설정을 따릅니다."))
 
         # 시작 버튼
-        self.btn_start_dubbing = QPushButton("🎬 동영상 합치기 및 자막 생성 (Start Dubbing)")
+        self.btn_start_dubbing = QPushButton("🎬 일괄 더빙 시작 (Batch Start)")
         self.btn_start_dubbing.setStyleSheet("height: 50px; font-weight: bold; background-color: #9C27B0; color: white; border-radius: 8px;")
         self.btn_start_dubbing.clicked.connect(self.start_video_dubbing)
         layout.addWidget(self.btn_start_dubbing)
@@ -2946,21 +3071,12 @@ class MainApp(QWidget):
         self.tab6.setLayout(layout)
 
     def start_video_dubbing(self):
-        v_path = self.dub_video_path.text().strip()
-        a_path = self.dub_audio_path.text().strip()
-        o_path = self.dub_output_path.text().strip()
+        v_dir = self.dub_video_dir.text().strip()
         
-        if not os.path.exists(v_path) or not os.path.exists(a_path):
-            QMessageBox.warning(self, "경고", "동영상 또는 오디오 파일이 존재하지 않습니다.")
-            return
-            
-        if not o_path:
-            QMessageBox.warning(self, "경고", "출력 경로를 지정해주세요.")
+        if not os.path.exists(v_dir):
+            QMessageBox.warning(self, "경고", "작업 폴더가 존재하지 않습니다.")
             return
 
-        # 자막: None으로 설정하여 Worker가 JSON에서 자동으로 찾게 함
-        subtitles = None
-                    
         # 스타일 (탭3에서 가져옴)
         style = {
             'font_family': self.combo_font.currentText(),
@@ -2976,11 +3092,11 @@ class MainApp(QWidget):
         volume = self.slider_volume.value() / 100.0
 
         self.btn_start_dubbing.setEnabled(False)
-        self.dub_log.append("⏳ 작업 시작...")
-        self.dub_log.append(f"⚙️ 적용 스타일: 폰트[{style['font_family']}] 크기[{style['font_size']}] 색상[{style['text_color']}]")
-        self.dub_log.append(f"   (폰트 크기가 너무 크거나 작으면 'Video Composite' 탭에서 조절하세요.)")
+        self.dub_log.append(f"⏳ 일괄 더빙 작업 시작: {v_dir}")
+        self.dub_log.append(f"⚙️ 적용 스타일: 폰트[{style['font_family']}]")
         
-        self.dub_worker = VideoDubbingWorker(v_path, a_path, o_path, subtitles, style, volume)
+        # BatchDubbingWorker class must be defined (will be added in next step)
+        self.dub_worker = BatchDubbingWorker(v_dir, style, volume)
         self.dub_worker.log_signal.connect(self.dub_log.append)
         self.dub_worker.finished.connect(lambda m, e: [self.dub_log.append(f"🏁 {m}"), self.btn_start_dubbing.setEnabled(True)])
         self.dub_worker.error.connect(lambda e: [self.dub_log.append(f"❌ {e}"), self.btn_start_dubbing.setEnabled(True)])
@@ -3893,6 +4009,146 @@ class MainApp(QWidget):
             self.log_display.append(f"❌ 압축 중 오류: {e}")
 
 
+    def initTabFTP(self):
+        layout = QVBoxLayout()
+        
+        # 안내
+        layout.addWidget(QLabel("📡 FTP 서버로 파일을 일괄 업로드합니다."))
+
+        # Server Info Group
+        server_group = QGroupBox("FTP 서버 정보")
+        form_layout = QFormLayout()
+        
+        self.ftp_host = QLineEdit("devlab.pics")
+        self.ftp_host.setPlaceholderText("서버 주소 (예: 192.168.0.1)")
+        
+        self.ftp_port = QLineEdit("21")
+        self.ftp_port.setFixedWidth(50)
+        
+        self.ftp_id = QLineEdit()
+        self.ftp_id.setPlaceholderText("ID")
+        
+        self.ftp_pw = QLineEdit()
+        self.ftp_pw.setPlaceholderText("Password")
+        self.ftp_pw.setEchoMode(QLineEdit.Password)
+        
+        # Host/Port Layout
+        host_layout = QHBoxLayout()
+        host_layout.addWidget(self.ftp_host)
+        host_layout.addWidget(QLabel("Port:"))
+        host_layout.addWidget(self.ftp_port)
+        
+        form_layout.addRow("서버 주소:", host_layout)
+        form_layout.addRow("아이디:", self.ftp_id)
+        form_layout.addRow("비밀번호:", self.ftp_pw)
+        
+        server_group.setLayout(form_layout)
+        layout.addWidget(server_group)
+
+        # Login/Logout Buttons Group (New)
+        login_btn_layout = QHBoxLayout()
+        
+        self.btn_ftp_login = QPushButton("로그인 (접속 테스트)")
+        self.btn_ftp_login.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold;")
+        self.btn_ftp_login.clicked.connect(self.ftp_login)
+        
+        self.btn_ftp_logout = QPushButton("로그아웃")
+        self.btn_ftp_logout.setStyleSheet("background-color: #757575; color: white; font-weight: bold;")
+        self.btn_ftp_logout.clicked.connect(self.ftp_logout)
+        
+        login_btn_layout.addWidget(self.btn_ftp_login)
+        login_btn_layout.addWidget(self.btn_ftp_logout)
+        
+        layout.addLayout(login_btn_layout)
+        
+        # Path Info Group
+        path_group = QGroupBox("전송 설정")
+        path_layout = QGridLayout()
+        
+        # Local Folder
+        self.ftp_local_dir = QLineEdit()
+        btn_local = QPushButton("내 PC 폴더 선택")
+        btn_local.clicked.connect(lambda: self.browse_folder(self.ftp_local_dir))
+        
+        path_layout.addWidget(QLabel("내 PC 폴더:"), 0, 0)
+        path_layout.addWidget(self.ftp_local_dir, 0, 1)
+        path_layout.addWidget(btn_local, 0, 2)
+        
+        # Remote Path
+        self.ftp_remote_dir = QLineEdit()
+        self.ftp_remote_dir.setPlaceholderText("서버 경로 (예: /public_html/video)")
+        
+        path_layout.addWidget(QLabel("서버 저장 경로:"), 1, 0)
+        path_layout.addWidget(self.ftp_remote_dir, 1, 1, 1, 2)
+        
+        path_group.setLayout(path_layout)
+        layout.addWidget(path_group)
+        
+        # Start Button
+        self.btn_ftp_start = QPushButton("🚀 FTP 업로드 시작")
+        self.btn_ftp_start.setStyleSheet("height: 50px; font-weight: bold; background-color: #009688; color: white; border-radius: 8px;")
+        self.btn_ftp_start.clicked.connect(self.start_ftp_upload)
+        layout.addWidget(self.btn_ftp_start)
+        
+        # Log
+        self.ftp_log = QTextEdit()
+        self.ftp_log.setReadOnly(True)
+        self.ftp_log.setStyleSheet("background-color: #1E1E1E; color: #D4D4D4;")
+        layout.addWidget(self.ftp_log)
+        
+        self.tab_ftp.setLayout(layout)
+
+    def start_ftp_upload(self):
+        host = self.ftp_host.text().strip()
+        port = self.ftp_port.text().strip()
+        user = self.ftp_id.text().strip()
+        passwd = self.ftp_pw.text().strip()
+        local_dir = self.ftp_local_dir.text().strip()
+        remote_dir = self.ftp_remote_dir.text().strip()
+        
+        if not host or not user or not passwd:
+            QMessageBox.warning(self, "경고", "서버 정보(주소, ID, 비번)를 모두 입력해주세요.")
+            return
+            
+        if not local_dir or not os.path.exists(local_dir):
+            QMessageBox.warning(self, "경고", "내 PC 폴더가 유효하지 않습니다.")
+            return
+
+        if not remote_dir:
+            QMessageBox.warning(self, "경고", "서버 저장 경로를 입력해주세요.")
+            return
+            
+        self.btn_ftp_start.setEnabled(False)
+        self.ftp_log.append("⏳ FTP 연결 및 업로드 시작...")
+        
+        self.ftp_worker = FTPUploadWorker(host, port, user, passwd, local_dir, remote_dir)
+        self.ftp_worker.log_signal.connect(self.ftp_log.append)
+        self.ftp_worker.finished.connect(lambda m: [self.ftp_log.append(f"🏁 {m}"), self.btn_ftp_start.setEnabled(True)])
+        self.ftp_worker.error.connect(lambda e: [self.ftp_log.append(f"❌ {e}"), self.btn_ftp_start.setEnabled(True)])
+        self.ftp_worker.start()
+
+    def ftp_login(self):
+        host = self.ftp_host.text().strip()
+        port = self.ftp_port.text().strip()
+        user = self.ftp_id.text().strip()
+        passwd = self.ftp_pw.text().strip()
+        
+        if not host or not user or not passwd:
+            QMessageBox.warning(self, "경고", "서버 주소, 아이디, 비밀번호를 입력해주세요.")
+            return
+
+        self.btn_ftp_login.setEnabled(False)
+        self.ftp_log.append("⏳ FTP 접속 테스트 중...")
+        
+        self.login_worker = FTPLoginWorker(host, port, user, passwd)
+        self.login_worker.log_signal.connect(self.ftp_log.append)
+        self.login_worker.finished.connect(lambda m: [self.ftp_log.append(f"🔔 {m}"), self.btn_ftp_login.setEnabled(True)])
+        self.login_worker.error.connect(lambda e: [self.ftp_log.append(f"❌ 접속 실패: {e}"), self.btn_ftp_login.setEnabled(True)])
+        self.login_worker.start()
+
+    def ftp_logout(self):
+        self.ftp_log.append("🔒 로그아웃(연결 정보 초기화) 되었습니다.")
+
     def initTab7(self):
         layout = QVBoxLayout()
 
@@ -4454,6 +4710,116 @@ class NumericTableWidgetItem(QTableWidgetItem):
         except ValueError:
             # 숫자가 아니면 문자열 비교
             return super().__lt__(other)
+
+class FTPUploadWorker(QThread):
+    log_signal = pyqtSignal(str)
+    finished = pyqtSignal(str)
+    error = pyqtSignal(str)
+    
+    def __init__(self, host, port, user, passwd, local_dir, remote_dir):
+        super().__init__()
+        self.host = host
+        self.port = int(port) if port.isdigit() else 21
+        self.user = user
+        self.passwd = passwd
+        self.local_dir = local_dir
+        self.remote_dir = remote_dir
+        
+    def run(self):
+        ftp = None
+        try:
+            self.log_signal.emit(f"🔌 연결 중: {self.host}:{self.port}")
+            ftp = ftplib.FTP()
+            ftp.connect(self.host, self.port, timeout=30)
+            ftp.login(self.user, self.passwd)
+            self.log_signal.emit("✅ 로그인 성공")
+            
+            # Create/Chdir Remote Dir
+            try:
+                ftp.cwd(self.remote_dir)
+                self.log_signal.emit(f"📂 서버 경로 이동: {self.remote_dir}")
+            except ftplib.error_perm:
+                self.log_signal.emit(f"📂 경로가 없어 생성을 시도합니다: {self.remote_dir}")
+                try:
+                    ftp.mkd(self.remote_dir)
+                    ftp.cwd(self.remote_dir)
+                    self.log_signal.emit("✅ 경로 생성 및 이동 완료")
+                except Exception as e:
+                    self.error.emit(f"경로 생성 실패: {e}")
+                    ftp.quit()
+                    return
+
+            # Upload Files
+            files = os.listdir(self.local_dir)
+            files = [f for f in files if os.path.isfile(os.path.join(self.local_dir, f))]
+            
+            total = len(files)
+            success = 0
+            
+            for i, filename in enumerate(files):
+                local_path = os.path.join(self.local_dir, filename)
+                self.log_signal.emit(f"⬆️ [{i+1}/{total}] 업로드 중: {filename}")
+                
+                with open(local_path, "rb") as f:
+                    try:
+                        ftp.storbinary(f"STOR {filename}", f)
+                        success += 1
+                        # self.log_signal.emit(f"   ✅ 완료")
+                    except Exception as e:
+                        self.log_signal.emit(f"   ❌ 실패: {filename} ({e})")
+            
+            ftp.quit()
+            self.finished.emit(f"업로드 완료 ({success}/{total} 파일)")
+            
+        except Exception as e:
+            self.error.emit(f"FTP 오류: {e}")
+            if ftp:
+                try: ftp.quit()
+                except: pass
+
+class FTPLoginWorker(QThread):
+    log_signal = pyqtSignal(str)
+    finished = pyqtSignal(str)
+    error = pyqtSignal(str)
+    
+    def __init__(self, host, port, user, passwd):
+        super().__init__()
+        self.host = host
+        self.port = int(port) if port.isdigit() else 21
+        self.user = user
+        self.passwd = passwd
+        
+    def run(self):
+        ftp = None
+        try:
+            self.log_signal.emit(f"🔌 연결 시도: {self.host}:{self.port}")
+            ftp = ftplib.FTP()
+            ftp.connect(self.host, self.port, timeout=15)
+            ftp.login(self.user, self.passwd)
+            
+            welcome = ftp.getwelcome()
+            self.log_signal.emit(f"✅ 로그인 성공! (Welcome: {welcome})")
+            
+            # Simple list to verify permissions
+            self.log_signal.emit("📂 루트 디렉토리 목록 조회:")
+            files = []
+            try:
+                ftp.dir(files.append) # Use dir instead of nlst for detail
+                for line in files[:5]: # Show top 5
+                    self.log_signal.emit(f"   {line}")
+                if len(files) > 5:
+                    self.log_signal.emit(f"   ... (총 {len(files)}개 항목)")
+            except:
+                self.log_signal.emit("   (목록 조회 권한이 없거나 실패함)")
+                
+            ftp.quit()
+            self.finished.emit("접속 테스트 성공")
+            
+        except Exception as e:
+            self.error.emit(str(e))
+            if ftp:
+                try: ftp.quit()
+                except: pass
 
 if __name__ == '__main__':
     sys.excepthook = exception_hook
