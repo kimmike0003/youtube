@@ -890,7 +890,7 @@ class VideoMergerWorker(QThread):
                 sub_timing_list = self.get_timing_from_metadata(meta_path, sub_list)
                 if sub_timing_list:
                     mode_info = "입력창 기준" if sub_list else "JSON 저장 데이터"
-                    self.log_signal.emit(f"   ℹ️ [정밀] {base_name}: {mode_info} 싱크 적용 (FFmpeg Native)")
+                    self.log_signal.emit(f"   ℹ️ [정밀] {base_name}: {len(sub_timing_list)}개 자막 구간 {mode_info} 싱크 적용")
             
             if not sub_timing_list and sub_list:
                 num_subs = len(sub_list)
@@ -921,6 +921,11 @@ class VideoMergerWorker(QThread):
                     # 표시 시간이 영상 길이보다 길면 무시
                     if start_t >= final_duration: continue
                     real_end = min(end_t, final_duration)
+                    
+                    # [Fix] 타임스탬프 데이터 오류로 길이가 0인 경우 강제 보정
+                    if real_end <= start_t:
+                        real_end = min(start_t + 3.0, final_duration)
+                        
                     if real_end <= start_t: continue
                     
                     # [Gap Filling Logic]
@@ -1204,7 +1209,9 @@ class VideoMergerWorker(QThread):
                     original_text = item
                     tts_text = item
 
-                text_clean = tts_text.replace(" ", "").strip()
+                # [Robust Match] 공백 및 특수문자 제거 후 매칭
+                # (ElevenLabs가 마침표를 생략하거나 다르게 줄 수 있음)
+                text_clean = re.sub(r'[^\w]', '', tts_text)
                 if not text_clean: continue
                 
                 seg_start_time = None
@@ -1215,8 +1222,11 @@ class VideoMergerWorker(QThread):
                 
                 search_idx = current_char_idx
                 while search_idx < len(chars):
-                    # 공백 제외 문자 매칭
-                    if not chars[search_idx].isspace():
+                    # 공백/특수문자 제외 문자 매칭
+                    c_char = chars[search_idx]
+                    c_clean = re.sub(r'[^\w]', '', c_char)
+                    
+                    if c_clean:
                         if match_start_idx == -1: match_start_idx = search_idx
                         temp_match += chars[search_idx]
                     
@@ -1720,6 +1730,11 @@ class VideoDubbingWorker(VideoMergerWorker):
                 for idx, (start_t, end_t, text) in enumerate(sub_timing_list):
                     if start_t >= audio_duration: continue
                     real_end = min(end_t, audio_duration)
+                    
+                    # [Fix] 타임스탬프 데이터 오류(3.04로 고정 등)로 길이가 0인 경우 강제 보정
+                    if real_end <= start_t:
+                        real_end = min(start_t + 3.0, audio_duration)
+                        
                     if real_end <= start_t: continue
 
                     # [Gap Filling Logic]
@@ -1795,7 +1810,10 @@ class VideoDubbingWorker(VideoMergerWorker):
             
             command.extend(["-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p"])
             command.extend(["-c:a", "aac", "-b:a", "192k"])
-            command.extend([self.output_path])
+            # [Fix] Input과 Output이 같으면 FFmpeg 에러 발생하므로 임시 파일 사용
+            # (사용자 피드백: 글씨가 안 나오는 이유는 인코딩 자체가 실패했기 때문임)
+            temp_output = self.output_path + f".temp_{int(time.time())}.mp4"
+            command.extend([temp_output])
             
             self.log_signal.emit(f"💾 최종 인코딩 시작 (Native FFmpeg)...")
             
@@ -1814,6 +1832,19 @@ class VideoDubbingWorker(VideoMergerWorker):
             
             if process.returncode != 0:
                 self.error.emit(f"❌ FFmpeg 오류: {stderr}")
+                if os.path.exists(temp_output):
+                    try: os.remove(temp_output)
+                    except: pass
+                return
+            
+            # 성공 시 원본 교체
+            try:
+                if os.path.exists(self.output_path):
+                    os.remove(self.output_path)
+                os.rename(temp_output, self.output_path)
+                self.log_signal.emit(f"✅ 파일 덮어쓰기 완료: {os.path.basename(self.output_path)}")
+            except Exception as e:
+                self.error.emit(f"❌ 파일 교체 실패: {e}")
                 return
             
             # Clean up temp subs
@@ -1832,7 +1863,11 @@ class VideoDubbingWorker(VideoMergerWorker):
             import traceback
             traceback.print_exc()
 
-class VideoConcatenatorWorker(QThread):
+# [참고] 기존 방식(VideoConcatenatorWorkerOld)은 각 파일마다 scale, pad 등 필터 문자열이 약 300자씩 추가되어
+# 130개 파일 기준 명령줄 길이가 40,000자를 초과하게 됩니다. (Windows 제한 32,767자)
+# 사용자의 파일 경로만 합치면 6,000자여도 필터 옵션 때문에 초과됩니다.
+# 따라서 Concat Demuxer 방식으로 변경하여 이 문제를 해결했습니다.
+class VideoConcatenatorWorkerOld(QThread):
     log_signal = pyqtSignal(str)
     finished = pyqtSignal(str, float)
     error = pyqtSignal(str)
@@ -2157,7 +2192,7 @@ class MainApp(QWidget):
         # 탭 5: Single Video
         self.tab5 = QWidget()
         self.initTab5()
-        self.tabs.addTab(self.tab5, "Single Video")
+        self.tabs.addTab(self.tab5, "Video Effects")
 
         # 탭 6: Video Dubbing
         self.tab6 = QWidget()
@@ -2740,32 +2775,29 @@ class MainApp(QWidget):
         layout = QVBoxLayout()
 
         # 파일 선택 그룹
-        file_group = QGroupBox("파일 선택")
+        # 폴더 선택 그룹 (Batch Processing)
+        file_group = QGroupBox("폴더 설정 (일괄 처리)")
         file_layout = QGridLayout()
 
-        # 이미지 선택
-        self.single_img_path = QLineEdit()
-        btn_browse_img = QPushButton("이미지 선택")
-        btn_browse_img.clicked.connect(lambda: self.browse_single_file(self.single_img_path, "Images (*.jpg *.png *.jpeg)"))
-        file_layout.addWidget(QLabel("이미지 파일:"), 0, 0)
-        file_layout.addWidget(self.single_img_path, 0, 1)
-        file_layout.addWidget(btn_browse_img, 0, 2)
+        # 입력 폴더 (오디오 + 이미지)
+        self.eff_input_dir = QLineEdit()
+        self.eff_input_dir.setPlaceholderText("오디오(.mp3)와 이미지 파일이 있는 폴더")
+        btn_browse_in = QPushButton("입력 폴더 선택")
+        btn_browse_in.clicked.connect(lambda: self.browse_folder(self.eff_input_dir))
+        
+        file_layout.addWidget(QLabel("입력(소스) 폴더:"), 0, 0)
+        file_layout.addWidget(self.eff_input_dir, 0, 1)
+        file_layout.addWidget(btn_browse_in, 0, 2)
 
-        # 오디오 선택
-        self.single_audio_path = QLineEdit()
-        btn_browse_audio = QPushButton("오디오 선택")
-        btn_browse_audio.clicked.connect(lambda: self.browse_single_file(self.single_audio_path, "Audio (*.mp3)"))
-        file_layout.addWidget(QLabel("오디오 파일:"), 1, 0)
-        file_layout.addWidget(self.single_audio_path, 1, 1)
-        file_layout.addWidget(btn_browse_audio, 1, 2)
-
-        # 출력 선택
-        self.single_output_path = QLineEdit()
-        btn_browse_out = QPushButton("저장 경로")
-        btn_browse_out.clicked.connect(lambda: self.browse_single_save_file(self.single_output_path))
-        file_layout.addWidget(QLabel("출력 영상:"), 2, 0)
-        file_layout.addWidget(self.single_output_path, 2, 1)
-        file_layout.addWidget(btn_browse_out, 2, 2)
+        # 출력 폴더
+        self.eff_output_dir = QLineEdit()
+        self.eff_output_dir.setPlaceholderText("결과물(.mp4) 저장 폴더")
+        btn_browse_out = QPushButton("출력 폴더 선택")
+        btn_browse_out.clicked.connect(lambda: self.browse_folder(self.eff_output_dir))
+        
+        file_layout.addWidget(QLabel("출력(저장) 폴더:"), 1, 0)
+        file_layout.addWidget(self.eff_output_dir, 1, 1)
+        file_layout.addWidget(btn_browse_out, 1, 2)
 
         file_group.setLayout(file_layout)
         layout.addWidget(file_group)
@@ -2808,8 +2840,16 @@ class MainApp(QWidget):
         self.spin_end_scale.setValue(1.15) # 기본 1.15 (115% 확대)
         self.spin_end_scale.setSuffix("x")
         
+        self.combo_effect_type.addItems(["효과 없음", "Zoom (확대/축소)", "Pan Left to Right (좌→우)", "Pan Right to Left (우→좌)"])
+        
+        # [NEW] 랜덤 효과 체크박스
+        self.chk_random_effect = QCheckBox("🎲 랜덤 적용")
+        self.chk_random_effect.setStyleSheet("font-weight: bold; color: #00BCD4;")
+        self.chk_random_effect.toggled.connect(lambda checked: self.combo_effect_type.setDisabled(checked))
+        
         effect_layout.addWidget(QLabel("효과 종류:"), 0, 0)
-        effect_layout.addWidget(self.combo_effect_type, 0, 1, 1, 3)
+        effect_layout.addWidget(self.combo_effect_type, 0, 1)
+        effect_layout.addWidget(self.chk_random_effect, 0, 2)
         
         effect_layout.addWidget(QLabel("시작 배율:"), 1, 0)
         effect_layout.addWidget(self.spin_start_scale, 1, 1)
@@ -2836,9 +2876,9 @@ class MainApp(QWidget):
         layout.addWidget(share_label)
 
         # 생성 버튼
-        self.btn_start_single = QPushButton("🎬 개별 영상 생성 시작 (Single Video)")
+        self.btn_start_single = QPushButton("🎬 영상 효과 적용 일괄 시작 (Batch Effect)")
         self.btn_start_single.setStyleSheet("height: 50px; font-weight: bold; background-color: #008CBA; color: white; border-radius: 8px;")
-        self.btn_start_single.clicked.connect(self.start_single_video_merge)
+        self.btn_start_single.clicked.connect(self.start_batch_video_effect)
         layout.addWidget(self.btn_start_single)
 
         # 로그
@@ -3163,8 +3203,39 @@ class MainApp(QWidget):
     def parse_subtitles(self, text):
         # returns { major_id: [ {"original": "...", "tts": "..."}, ... ] }
         subs = collections.defaultdict(list)
-        lines = text.strip().split('\n')
         
+        # 1. 전역 정규식 파싱 (Global Regex Parsing)
+        # 한 줄에 여러 항목이 있거나 줄바꿈이 불규칙해도 "ID 원본: ... TTS: ..." 패턴을 모두 찾아냄.
+        # 패턴: 12-34 원본: ... TTS: ... (다음 ID 패턴이나 헤더가 나오기 전까지)
+        # Lookahead: 다음 "숫자-숫자 원본:" 혹은 "숫자. {}" 헤더 혹은 문장 끝
+        
+        regex_pattern = r'(\d+)-(\d+)\s*원본:(.*?)\s*TTS:(.*?)(?=\s*\d+-\d+\s*원본:|\s*\d+\.\s*\{|$)'
+        
+        # re.DOTALL: .이 개행문자도 포함 (여러 줄 걸친 내용도 매칭)
+        matches = list(re.finditer(regex_pattern, text, re.DOTALL | re.IGNORECASE))
+        
+        if len(matches) > 0:
+            self.log_signal.emit(f"📋 패턴 감지 성공: {len(matches)}개의 항목을 찾았습니다.")
+            for match in matches:
+                major_id = match.group(1)
+                # sub_id = match.group(2)
+                original_text = match.group(3).strip()
+                tts_text = match.group(4).strip()
+                
+                # 끝부분의 콤마 제거
+                if original_text.endswith(','): original_text = original_text[:-1].strip()
+                if tts_text.endswith(','): tts_text = tts_text[:-1].strip()
+                
+                subs[major_id].append({
+                    "original": original_text,
+                    "tts": tts_text
+                })
+            return subs
+        
+        # 2. 기존 라인 단위 파싱 (Fallback)
+        # 위 패턴매칭에 실패한 경우 (예: 원본/TTS 키워드가 없거나 포맷이 다른 경우)
+        
+        lines = text.strip().split('\n')
         current_id = None
         current_item = {"original": "", "tts": ""}
         
@@ -3172,50 +3243,15 @@ class MainApp(QWidget):
             line = line.strip()
             if not line: continue
             
-            # Skip major group headers like "1. {}" ONLY if it looks like a pure header lines
-            # If the user put "86.{} 86-1 원본: ..." on one line, we should NOT skip it.
+            # Skip major group headers like "1. {}" if pure header
             if re.match(r'^\d+\.\s*\{.*\}', line):
-                # If it contains actual content markers, process it. Otherwise skip.
-                if "원본:" not in line and "TTS:" not in line:
+                 if "원본:" not in line and "TTS:" not in line:
                     continue
             
-            # 1. 한 줄 포맷 처리: "1-1 원본: ... TTS: ..."
-            # 대소문자 구분 없이 처리하기 위해 lower() 검사, 그러나 값은 유지
-            if "원본:" in line and "TTS:" in line:
-                # 헤더(86.{})가 앞에 붙어있을 수 있으므로 match -> search로 변경
-                # 또한 ID 뒤에 공백이나 문자가 바로 올 수 있음
-                id_match = re.search(r'(\d+)-(\d+)', line)
-                if id_match:
-                    major_id = id_match.group(1)
-                    
-                    # TTS: 기준으로 분리
-                    try:
-                        # rsplit 대신 split 사용하되, 원본 내에 TTS: 가 들어갈 일은 적다고 가정
-                        # 안전하게 정규식 split 사용
-                        parts = re.split(r'\s*TTS:\s*', line, maxsplit=1)
-                        if len(parts) == 2:
-                            left_part = parts[0] # "1-1 원본: 내용 ,"
-                            tts_text = parts[1].strip() # "발음 내용"
-                            
-                            if left_part.endswith(','): left_part = left_part[:-1]
-                            if tts_text.endswith(','): tts_text = tts_text[:-1]
-                            
-                            # left_part에서 "원본:" 분리
-                            val_parts = left_part.split("원본:", 1)
-                            if len(val_parts) == 2:
-                                original_text = val_parts[1].strip()
-                                if original_text.endswith(','): original_text = original_text[:-1]
-                                
-                                subs[major_id].append({
-                                    "original": original_text.strip(),
-                                    "tts": tts_text.strip()
-                                })
-                                continue
-                    except:
-                        pass
-
-            # 2. 기존 멀티라인 로직 유지
-            # Check for ID line like "1-1", "2-1" only if strictly regex matched
+            # 여기서부터는 키워드가 정확하지 않은 구형 포맷 등을 처리
+            # 하지만 1번 로직에서 잡지 못한 "ID 원본: ... TTS: ..."는 사실상 형식이 깨진 것이므로
+            # 여기서는 전통적인 ID 줄바꿈 방식 등을 처리.
+            
             id_match = re.match(r'^(\d+)-(\d+)$', line)
             if id_match:
                 current_id = id_match.group(1)
@@ -3232,11 +3268,11 @@ class MainApp(QWidget):
                     subs[current_id].append(dict(current_item))
                     current_item = {"original": "", "tts": ""}
             else:
-                # Fallback for old simple format: "1-1 content" (no 원본/TTS keywords)
-                # 단, 위에서 처리된 한 줄 포맷(원본/TTS 포함)은 여기 오면 안됨 (continue 처리됨)
+                # 구형 포맷: 키워드 없이 "1-1 내용"
+                # 단, 원본/TTS 키워드가 있는 줄은 위에서 처리되어야 하므로 제외
                 if "원본:" in line or "TTS:" in line:
-                    continue # 키워드가 있는데 위에서 처리가 안된건 형식이 깨진 것이므로 무시하거나 로그
-                    
+                    continue 
+
                 match = re.match(r'^(\d+)-\d+\.?\s*(.*)', line)
                 if match:
                     major_id = match.group(1)
@@ -4177,6 +4213,229 @@ class MainApp(QWidget):
         self.an_worker.finished.connect(lambda m: [self.an_log.append(f"🏁 {m}"), self.btn_start_an.setEnabled(True)])
         self.an_worker.error.connect(lambda e: [self.an_log.append(f"❌ {e}"), self.btn_start_an.setEnabled(True)])
         self.an_worker.start()
+
+    def start_batch_video_effect(self):
+        input_dir = self.eff_input_dir.text().strip()
+        output_dir = self.eff_output_dir.text().strip()
+        
+        if not input_dir or not os.path.exists(input_dir):
+            QMessageBox.warning(self, "경고", "입력 폴더가 존재하지 않습니다.")
+            return
+            
+        if not output_dir:
+            QMessageBox.warning(self, "경고", "출력 폴더를 지정해주세요.")
+            return
+            
+        if not os.path.exists(output_dir):
+            try:
+                os.makedirs(output_dir)
+            except:
+                QMessageBox.warning(self, "경고", "출력 폴더를 생성할 수 없습니다.")
+                return
+
+        # 설정값 읽기
+        style = {
+            'font_family': self.combo_font.currentText(),
+            'font_size': self.spin_font_size.value(),
+            'text_color': self.color_text,
+            'outline_color': self.color_outline,
+            'bg_color': self.color_bg,
+            'bg_opacity': int(self.slider_bg_opacity.value() * 2.55),
+            'use_bg': self.checkbox_use_bg.isChecked(),
+            'use_outline': self.checkbox_use_outline.isChecked()
+        }
+        volume = self.slider_volume.value() / 100.0
+        trim_end = self.spin_trim_end.value()
+        
+        # Effect Config
+        effect_config = {
+            'type': self.combo_effect_type.currentIndex(), 
+            # 0: None, 1: Zoom, 2: Pan L->R, 3: Pan R->L
+            'start_scale': self.spin_start_scale.value(),
+            'end_scale': self.spin_end_scale.value(),
+            'pan_speed': self.spin_pan_speed.value(),
+            'random': self.chk_random_effect.isChecked()
+        }
+
+        self.btn_start_single.setEnabled(False)
+        self.single_log.append(f"⏳ 일괄 작업 시작: {input_dir}")
+        self.single_log.append(f"   출력 대상: {output_dir}")
+
+        self.batch_eff_worker = BatchVideoEffectWorker(
+            input_dir, output_dir, style, volume, trim_end, effect_config
+        )
+        self.batch_eff_worker.log_signal.connect(self.single_log.append)
+        self.batch_eff_worker.finished.connect(lambda m, t: [self.single_log.append(f"🏁 {m}"), self.btn_start_single.setEnabled(True)])
+        self.batch_eff_worker.error.connect(lambda e: [self.single_log.append(f"❌ {e}"), self.btn_start_single.setEnabled(True)])
+        self.batch_eff_worker.start()
+
+class BatchVideoEffectWorker(VideoMergerWorker):
+    def __init__(self, input_dir, output_dir, style=None, volume=1.0, trim_end=0.0, effect_config=None):
+        # 부모 생성자 호출 (경로는 input_dir로 설정)
+        super().__init__(input_dir, input_dir, output_dir, subtitles=None, style=style, volume=volume, trim_end=trim_end)
+        self.input_dir = input_dir
+        self.output_dir = output_dir
+        self.effect_config = effect_config # 부모 process_single_video가 이 속성을 참조하여 효과 적용
+        
+    def run(self):
+        start_time = time.time()
+        try:
+            # MP3 파일 검색
+            if not os.path.exists(self.input_dir):
+                self.error.emit(f"입력 폴더 없음: {self.input_dir}")
+                return
+
+            all_files = os.listdir(self.input_dir)
+            mp3_files = [f for f in all_files if f.lower().endswith('.mp3')]
+            
+            if not mp3_files:
+                self.error.emit("입력 폴더에 .mp3 파일이 없습니다.")
+                return
+                
+            # 자연스러운 정렬 (1.mp3, 2.mp3, 10.mp3)
+            mp3_files.sort(key=lambda s: [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', s)])
+            
+            total = len(mp3_files)
+            success_count = 0
+            
+            for idx, mp3 in enumerate(mp3_files):
+                base_name = os.path.splitext(mp3)[0]
+                audio_path = os.path.join(self.input_dir, mp3)
+                output_path = os.path.join(self.output_dir, f"{base_name}.mp4")
+                
+                # 이미지 찾기 (같은 폴더 내)
+                img_path = None
+                for ext in ['.png', '.jpg', '.jpeg', '.webp']:
+                    check = os.path.join(self.input_dir, base_name + ext)
+                    if os.path.exists(check):
+                        img_path = check
+                        break
+                        
+                if not img_path:
+                    self.log_signal.emit(f"⚠️ [{idx+1}/{total}] 이미지 없음, 건너뜀: {base_name}")
+                    continue
+                
+                self.log_signal.emit(f"🎬 [{idx+1}/{total}] 처리 중: {base_name}")
+                
+                # [NEW] 랜덤 효과 로직
+                if self.effect_config and self.effect_config.get('random'):
+                    import random
+                    new_type = random.randint(1, 3) # 1~3 (Zoom, PanLR, PanRL)
+                    self.effect_config['type'] = new_type
+                    
+                    eff_names = ["None", "Zoom", "Pan(L->R)", "Pan(R->L)"]
+                    if 0 <= new_type < len(eff_names):
+                        self.log_signal.emit(f"   🎲 랜덤 효과 적용: {eff_names[new_type]}")
+                
+                # 자막 자동 로드 (부모 클래스가 JSON 자동 로드함)
+                # Task 준비 (img, audio, output, base_name, manual_subs=None)
+                task = (img_path, audio_path, output_path, base_name, None)
+                
+                # process_single_video 호출
+                res = self.process_single_video(task)
+                if res:
+                    success_count += 1
+            
+            elapsed = time.time() - start_time
+            self.finished.emit(f"전체 작업 완료: {success_count}/{total} 성공", elapsed)
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.error.emit(f"오류: {e}")
+
+class VideoConcatenatorWorker(QThread):
+    log_signal = pyqtSignal(str)
+    finished = pyqtSignal(str, float)
+    error = pyqtSignal(str)
+
+    def __init__(self, video_dir, output_file, watermark_path=None):
+        super().__init__()
+        self.video_dir = video_dir
+        self.output_file = output_file
+        self.watermark_path = watermark_path
+
+    def run(self):
+        start_time = time.time()
+        temp_list_path = ""
+        try:
+            self.log_signal.emit("📂 영상 합치기 준비 중 (Concat Demuxer Mode)...")
+            
+            ffmpeg_exe = "ffmpeg"
+            try:
+                import imageio_ffmpeg
+                ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+            except: pass
+
+            if not os.path.exists(self.video_dir):
+                self.error.emit("입력 폴더가 존재하지 않습니다.")
+                return
+
+            all_files = os.listdir(self.video_dir)
+            files = [os.path.join(self.video_dir, f) for f in all_files if f.lower().endswith(('.mp4', '.avi', '.mov', '.mkv'))]
+            
+            if not files:
+                self.error.emit("합칠 영상 파일이 없습니다.")
+                return
+
+            files.sort(key=lambda s: [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', s)])
+            
+            self.log_signal.emit(f"🔢 총 {len(files)}개의 영상 파일 발견.")
+
+            temp_list_path = os.path.join(self.video_dir, f"concat_list_{int(time.time())}.txt")
+            with open(temp_list_path, "w", encoding='utf-8') as f:
+                for vid_path in files:
+                    safe_path = vid_path.replace("\\", "/").replace("'", "'\\''")
+                    f.write(f"file '{safe_path}'\n")
+            
+            command = [ffmpeg_exe]
+            command.extend(["-y", "-f", "concat", "-safe", "0", "-i", temp_list_path])
+            
+            map_options = []
+            
+            if self.watermark_path and os.path.exists(self.watermark_path):
+                command.extend(["-i", self.watermark_path])
+                filter_complex = "[1:v]scale=100:-1[wm];[0:v][wm]overlay=20:20[v_out]"
+                command.extend(["-filter_complex", filter_complex])
+                map_options = ["-map", "[v_out]", "-map", "0:a"]
+            else:
+                map_options = ["-map", "0"]
+
+            command.extend(map_options)
+            
+            command.extend(["-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p"])
+            command.extend(["-c:a", "aac", "-b:a", "192k"])
+            
+            command.append(self.output_file)
+            
+            self.log_signal.emit(f"🚀 합치기 실행 (파일 리스트 방식)...")
+            
+            creation_flags = 0x08000000 if os.name == 'nt' else 0
+            process = subprocess.Popen(
+                command, 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.PIPE, 
+                universal_newlines=True, 
+                encoding='utf-8',
+                creationflags=creation_flags
+            )
+            
+            stdout, stderr = process.communicate()
+            
+            if process.returncode != 0:
+                self.error.emit(f"❌ FFmpeg 오류: {stderr}")
+            else:
+                elapsed = time.time() - start_time
+                self.finished.emit(f"✅ 완료: {os.path.basename(self.output_file)}", elapsed)
+            
+        except Exception as e:
+            self.error.emit(f"❌ 오류 발생: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            if temp_list_path and os.path.exists(temp_list_path):
+                try: os.remove(temp_list_path)
+                except: pass
 
 def exception_hook(exctype, value, tb):
     tb_str = "".join(traceback.format_exception(exctype, value, tb))
