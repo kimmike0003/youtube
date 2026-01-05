@@ -4,3 +4,4 @@ dist/
 __pycache__/
 *.pyc
 *.spec
+gemini_debug.html
