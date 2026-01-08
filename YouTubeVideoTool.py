@@ -435,9 +435,24 @@ class VideoMergerWorker(QThread):
                         found_img_name = base_name + ext
                         break
                 
+                # [NEW] Multi-Image Check: If no base image, check if index-based images (1.jpg, etc.) exist
                 if not img_path:
-                    self.log_signal.emit(f"⚠️ 이미지 없음 스킵: {base_name} (오디오 기준 처리 중)")
-                    continue
+                    # Check for 1.jpg, 1.png etc. in image_dir (or a subfolder if user prefers)
+                    # For now, check if 1.jpg exists in image_dir or in a subfolder named base_name
+                    multi_img_detected = False
+                    for ext in valid_exts:
+                        if os.path.exists(os.path.join(self.image_dir, "1" + ext)) or \
+                           os.path.exists(os.path.join(self.image_dir, base_name, "1" + ext)):
+                            multi_img_detected = True
+                            break
+                    
+                    if multi_img_detected:
+                        img_path = "MULTI_IMAGE_MODE" # Signal for process_single_video
+                        self.log_signal.emit(f"ℹ️ 다중 이미지 모드 감지: {base_name}")
+                
+                if not img_path:
+                    self.log_signal.emit(f"ℹ️ 이미지 없음 (검정 배경 사용): {base_name}")
+                    # img_path는 None으로 유지되어 process_single_video에서 처리됨
                 
                 output_path = os.path.join(self.output_dir, base_name + ".mp4")
                 
@@ -481,7 +496,7 @@ class VideoMergerWorker(QThread):
             self.log_signal.emit(f"🚀 총 {len(tasks)}개의 영상 합성을 시작합니다. (병렬 처리 모드)")
             
             # ThreadPoolExecutor를 사용하여 병렬 작업 수행
-            max_workers = min(3, multiprocessing.cpu_count()) # 시스템 부담을 고려해 최대 3개로 제한
+            max_workers = min(2, multiprocessing.cpu_count()) # 메모리 할당 오류 방지를 위해 최대 2개로 제한
             success_count = 0
             
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -549,9 +564,22 @@ class VideoMergerWorker(QThread):
             if self.subtitles and base_name in self.subtitles:
                 sub_list = self.subtitles[base_name]
 
+            # 항상 SRT 파싱 시도 (다중 이미지 인덱스 매칭용)
+            srt_path_check = audio_path.replace(".mp3", ".srt")
+            segments = None
+            if os.path.exists(srt_path_check):
+                segments = self.parse_srt(srt_path_check)
+                if not sub_timing_list:
+                    for seg in segments:
+                        sub_timing_list.append((seg['start'], seg['end'], seg['text']))
+                    if sub_timing_list:
+                        self.log_signal.emit(f"   ℹ️ [SRT] {base_name}: {len(sub_timing_list)}개 자막 구간 싱크 적용")
+            
             if os.path.exists(meta_path):
-                sub_timing_list = self.get_timing_from_metadata(meta_path, sub_list)
-                if sub_timing_list:
+                # JSON이 있으면 덮어쓰기 (더 정밀함)
+                json_timing = self.get_timing_from_metadata(meta_path, sub_list)
+                if json_timing:
+                    sub_timing_list = json_timing
                     mode_info = "입력창 기준" if sub_list else "JSON 저장 데이터"
                     self.log_signal.emit(f"   ℹ️ [정밀] {base_name}: {len(sub_timing_list)}개 자막 구간 {mode_info} 싱크 적용")
             
@@ -617,18 +645,149 @@ class VideoMergerWorker(QThread):
                     temp_files.append(sub_path)
                     subtitle_inputs.append((sub_path, start_t, real_end))
 
-            # 4. FFmpeg 명령어 구성
-            command = [ffmpeg_exe]
+            # [NEW] Multi-Image Switching Logic
+            image_checkpoints = []
+            final_img_concat_path = None
             
-            # [Input 0] 배경 이미지 (Loop)
-            command.extend(["-loop", "1", "-t", f"{final_duration:.6f}", "-i", img_path])
+            # segments were parsed above
+            if segments:
+                # Use os.path.dirname(audio_path) or self.image_dir as base
+                # In run(), we checked self.image_dir.
+                search_dirs = [os.path.dirname(audio_path), self.image_dir, os.path.join(self.image_dir, base_name)]
+                
+                found_at_least_one = False
+                for seg in segments:
+                    idx = seg['index']
+                    t = seg['start']
+                    
+                    for s_dir in search_dirs:
+                        found_path = None
+                        for ext in ['.jpg', '.png', '.jpeg', '.webp']:
+                            check = os.path.join(s_dir, f"{idx}{ext}")
+                            if os.path.exists(check):
+                                found_path = check
+                                break
+                        if found_path:
+                            image_checkpoints.append((t, found_path))
+                            found_at_least_one = True
+                            break
+                
+                if len(image_checkpoints) > 1:
+                    # Create Concat List for Images
+                    image_temp_dir = os.path.join(os.path.dirname(output_path), f"temp_imgs_{base_name}")
+                    os.makedirs(image_temp_dir, exist_ok=True)
+                    
+                    processed_imgs = []
+                    for i_p_idx, (t, img_p) in enumerate(image_checkpoints):
+                        img_name_only = os.path.basename(img_p)
+                        scaled_p = os.path.join(image_temp_dir, f"scaled_{i_p_idx}_{img_name_only}.png")
+                        
+                        try:
+                            with Image.open(img_p) as test_img:
+                                if test_img.mode != 'RGB': test_img = test_img.convert('RGB')
+                                iw, ih = test_img.size
+                                aspect = iw / ih
+                                target_aspect = TARGET_W / TARGET_H
+                                if aspect > target_aspect:
+                                    new_w = TARGET_W; new_h = int(TARGET_W / aspect)
+                                else:
+                                    new_h = TARGET_H; new_w = int(TARGET_H * aspect)
+                                resized = test_img.resize((new_w, new_h), Image.LANCZOS)
+                                final_bg = Image.new('RGB', (TARGET_W, TARGET_H), (0, 0, 0))
+                                offset = ((TARGET_W - new_w) // 2, (TARGET_H - new_h) // 2)
+                                final_bg.paste(resized, offset)
+                                final_bg.save(scaled_p)
+                                processed_imgs.append((t, scaled_p))
+                                temp_files.append(scaled_p)
+                        except Exception as e:
+                            # Fallback: Black background to prevent resolution mismatch OOM/Error
+                            black_fallback = os.path.join(image_temp_dir, f"fallback_{i_p_idx}.png")
+                            Image.new('RGB', (TARGET_W, TARGET_H), (0,0,0)).save(black_fallback)
+                            processed_imgs.append((t, black_fallback))
+                            temp_files.append(black_fallback)
+                    
+                    # Sync Fix: 0.0s check
+                    processed_imgs.sort(key=lambda x: x[0])
+                    if processed_imgs and processed_imgs[0][0] > 0.001:
+                        black_p = os.path.join(image_temp_dir, "black_start.png")
+                        if not os.path.exists(black_p):
+                            Image.new('RGB', (TARGET_W, TARGET_H), (0,0,0)).save(black_p)
+                        processed_imgs.insert(0, (0.0, black_p))
+                        temp_files.append(black_p)
+                    
+                    final_img_concat_path = os.path.join(image_temp_dir, f"img_list.txt")
+                    with open(final_img_concat_path, "w", encoding='utf-8') as f:
+                        for i, (t, p) in enumerate(processed_imgs):
+                            safe_p = p.replace("\\", "/")
+                            if i < len(processed_imgs) - 1:
+                                dur = processed_imgs[i+1][0] - t
+                                f.write(f"file '{safe_p}'\n")
+                                f.write(f"duration {dur:.3f}\n")
+                            else:
+                                dur = final_duration - t
+                                if dur < 0.1: dur = 0.5
+                                f.write(f"file '{safe_p}'\n")
+                                f.write(f"duration {dur:.3f}\n")
+                        # Repeat last for EOF
+                        if processed_imgs:
+                            f.write(f"file '{processed_imgs[-1][1].replace('\\','/')}'\n")
+                    
+                    temp_files.append(final_img_concat_path)
+
+            # 4. FFmpeg 명령어 구성
+            command = [ffmpeg_exe, "-y", "-fflags", "+genpts"]
+            
+            # [Input 0] 배경 이미지 (Loop, Concat, or Black)
+            if final_img_concat_path:
+                command.extend(["-f", "concat", "-safe", "0", "-i", final_img_concat_path])
+            elif img_path and os.path.exists(img_path) and img_path != "MULTI_IMAGE_MODE":
+                command.extend(["-loop", "1", "-t", f"{final_duration:.6f}", "-i", img_path])
+            else:
+                # 검정 배경 생성 (lavfi color filter 사용)
+                command.extend(["-f", "lavfi", "-i", f"color=c=black:s={TARGET_W}x{TARGET_H}:r={FPS}:d={final_duration:.6f}"])
             
             # [Input 1] 오디오
             command.extend(["-i", audio_path])
             
-            # [Input 2~N] 자막 PNG들
-            for s_path, _, _ in subtitle_inputs:
-                command.extend(["-i", s_path])
+            # [Input 2] 자막용 Concat 파일 (WinError 206 방지용)
+            concat_sub_list_p = os.path.join(temp_dir, f"subs_{base_name}.txt")
+            transparent_p = os.path.join(temp_dir, "transparent.png")
+            
+            # 투명 배경 이미지 생성 (1920x1080)
+            if not os.path.exists(transparent_p):
+                Image.new('RGBA', (TARGET_W, TARGET_H), (0,0,0,0)).save(transparent_p)
+            
+            with open(concat_sub_list_p, "w", encoding='utf-8') as f:
+                last_time = 0.0
+                for s_p, s_t, e_t in subtitle_inputs:
+                    # 이전 자막과의 공백 처리
+                    gap = s_t - last_time
+                    if gap > 0.001:
+                        f.write(f"file '{transparent_p}'\n")
+                        f.write(f"duration {gap:.3f}\n")
+                    
+                    # 현재 자막
+                    dur = e_t - s_t
+                    if dur < 0.001: dur = 0.1 # 최소 길이 보장
+                    f.write(f"file '{s_p}'\n")
+                    f.write(f"duration {dur:.3f}\n")
+                    last_time = e_t
+                
+                # 영상 끝까지 투명 처리 추가 (필요시)
+                if last_time < final_duration:
+                    f.write(f"file '{transparent_p}'\n")
+                    f.write(f"duration {final_duration - last_time:.3f}\n")
+                
+                # FFmpeg concat demuxer requirement: last file repeated (without duration is common or just ensure duration)
+                # But duration is usually enough. For safety, some repeat last entry.
+                if subtitle_inputs:
+                    last_file = subtitle_inputs[-1][0]
+                    f.write(f"file '{last_file}'\n") # No duration for EOF hint
+
+            # FFmpeg fix: forward slashes in concat file
+            self.fix_concat_file_local(concat_sub_list_p)
+            
+            command.extend(["-f", "concat", "-safe", "0", "-i", concat_sub_list_p])
                 
             filter_complex = ""
             
@@ -650,7 +809,7 @@ class VideoMergerWorker(QThread):
             
             # Debugging Effect Config
             if effect_config:
-                self.log_signal.emit(f"   [Debug] Effect Type: {effect_type}")
+                self.log_signal.emit(f"   🚀 [Ultra-Smooth] Applying 8K Supersampling Effect: {effect_type}")
                 self.log_signal.emit(f"   [Debug] Config: {effect_config}")
             else:
                 pass # self.log_signal.emit("   [Debug] No effect config found.")
@@ -665,127 +824,79 @@ class VideoMergerWorker(QThread):
             #    떨림 방지를 위해 8K(7680x4320)로 업스케일링 (Supersampling)
             #    [Fix] fps=30 명시
             #    [Fix] Upscale시에는 bicubic이 ringing artifact가 적어 떨림이 덜해 보임
-            filter_complex += f"[0:v]scale=7680:4320:flags=bicubic,setsar=1:1,fps={FPS}[v_high];"
-            
-            # B) Zoom/Pan Expression
-            # Default (No Effect): z=1
-            start_scale = effect_config.get('start_scale', 1.0) if effect_config else 1.0
-            end_scale = effect_config.get('end_scale', 1.0) if effect_config else 1.0
-            
-            # duration (total frames)
-            total_frames = int(final_duration * FPS)
-            if total_frames <= 0: total_frames = 1
-            
-            if effect_type == 1: # Zoom (Unified)
-                # Linear Interpolation: start + (end-start) * on/duration
-                # [Fix] total_frames-1 로 나누어 마지막 프레임에서 정확히 end_scale 도달
-                denom = total_frames - 1 if total_frames > 1 else 1
-                z_expr = f"{start_scale}+({end_scale}-{start_scale})*on/{denom}"
-                # [Fix] Center Coordinate Calculation simplification
-                x_expr = "(iw-iw/zoom)/2"
-                y_expr = "(ih-ih/zoom)/2"
+            filter_parts = []
+            if final_img_concat_path:
+                # Concat 모드 (다중 이미지): 메모리 절약을 위해 zoompan 대신 간단한 스케일링/패딩만 적용
+                # (비디오 스트림에 zoompan을 적용하면 메모리 부족 오류 발생 확률이 매우 높음)
+                filter_parts.append(f"[0:v]fps={FPS},scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=decrease,pad={TARGET_W}:{TARGET_H}:(ow-iw)/2:(oh-ih)/2,setsar=1:1[v_bg]")
+            elif img_path and os.path.exists(img_path) and img_path != "MULTI_IMAGE_MODE":
+                # Effect Config (Zoom/Pan)
+                # [Anti-Jitter] 8K(7680x4320) Ultra-Supersampling
+                SUPER_W, SUPER_H = 7680, 4320
+                filter_parts.append(f"[0:v]scale={SUPER_W}:{SUPER_H}:flags=bicubic,setsar=1:1,fps={FPS}[v_high]")
+                
+                # B) Zoom/Pan Expression
+                start_scale = effect_config.get('start_scale', 1.0) if effect_config else 1.0
+                end_scale = effect_config.get('end_scale', 1.0) if effect_config else 1.0
+                total_frames = int(final_duration * FPS)
+                if total_frames <= 0: total_frames = 1
+                
+                if effect_type == 1: # Zoom (Unified)
+                    denom = total_frames - 1 if total_frames > 1 else 1
+                    z_expr = f"{start_scale}+({end_scale}-{start_scale})*on/{denom}"
+                    x_expr = "(iw-iw/zoom)/2"
+                    y_expr = "(ih-ih/zoom)/2"
+                elif effect_type == 2: # Pan Left -> Right
+                    pan_z = max(start_scale, 1.05)
+                    p_speed = effect_config.get('pan_speed', 1.0)
+                    z_expr = f"{pan_z}"
+                    denom = total_frames - 1 if total_frames > 1 else 1
+                    progress_expr = f"(on*{p_speed}/{denom})"
+                    x_expr = f"(iw-iw/zoom)*(1-min(1,{progress_expr}))"
+                    y_expr = "ih/2-(ih/2/zoom)"
+                elif effect_type == 3: # Pan Right -> Left
+                    pan_z = max(start_scale, 1.05)
+                    p_speed = effect_config.get('pan_speed', 1.0)
+                    z_expr = f"{pan_z}"
+                    denom = total_frames - 1 if total_frames > 1 else 1
+                    progress_expr = f"(on*{p_speed}/{denom})"
+                    x_expr = f"(iw-iw/zoom)*min(1,{progress_expr})"
+                    y_expr = "ih/2-(ih/2/zoom)"
+                else:
+                    z_expr = "1"; x_expr = "0"; y_expr = "0"
 
-            elif effect_type == 2: # Pan Left -> Right
-                # Camera moves Left to Right -> Viewport moves Right to Left relative to image?
-                # Usually "Pan Left to Right" means we see the left side first, then pan to the right side.
-                # Left Side (x=0) -> Right Side (x=max)
-                # [Correction] User says it's reversed. So current implementation (0->max) is what they think is "Right -> Left"?
-                # Let's SWAP them.
-                
-                # New Logic for Type 2 (Left->Right label):
-                # Start: x=max (Right side of image) -> End: x=0 (Left side of image)?
-                # Wait, "Pan Left to Right" typically means "Move camera to right".
-                # If camera moves right, the image frame moves left.
-                # Let's simply SWAP the formulas as requested.
-                
-                pan_z = max(start_scale, 1.05)
-                p_speed = effect_config.get('pan_speed', 1.0)
-                z_expr = f"{pan_z}"
-                
-                # Swapped to (max -> 0)
-                denom = total_frames - 1 if total_frames > 1 else 1
-                progress_expr = f"(on*{p_speed}/{denom})"
-                x_expr = f"(iw-iw/zoom)*(1-min(1,{progress_expr}))"
-                y_expr = "ih/2-(ih/2/zoom)"
-                
-            elif effect_type == 3: # Pan Right -> Left
-                # Swapped to (0 -> max)
-                pan_z = max(start_scale, 1.05)
-                p_speed = effect_config.get('pan_speed', 1.0)
-                z_expr = f"{pan_z}"
-
-                denom = total_frames - 1 if total_frames > 1 else 1
-                progress_expr = f"(on*{p_speed}/{denom})"
-                x_expr = f"(iw-iw/zoom)*min(1,{progress_expr})"
-                y_expr = "ih/2-(ih/2/zoom)"
+                filter_parts.append(f"[v_high]zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={SUPER_W}x{SUPER_H}:fps={FPS}[v_zoomed]")
+                # 최종적으로 4K에서 1080p로 다운스케일 (Lanczos 필터로 부드럽게 유지)
+                filter_parts.append(f"[v_zoomed]scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=decrease:flags=lanczos,pad={TARGET_W}:{TARGET_H}:(ow-iw)/2:(oh-ih)/2,setsar=1:1[v_bg]")
             else:
-                z_expr = "1"
-                x_expr = "0"
-                y_expr = "0"
-                
-            # C) Apply Zoompan
-            # [Fix] zoompan은 기본적으로 입력 프레임 하나당 1프레임을 출력하려 함.
-            # 하지만 우리는 이미지를 loop쳐서 영상 스트림으로 만들었음 (-loop 1 -t duration ...)
-            # 따라서 입력 스트림은 이미 total_frames 만큼의 길이를 가짐.
-            # 이 경우 d=1 (input duration 1 frame -> output 1 frame)로 설정하면 1:1 매핑되어
-            # on (output frame number)이 0부터 total_frames까지 증가하며 애니메이션이 적용됨.
-            
-            # 단, 만약 입력이 단일 이미지(1프레임)였다면 d=total_frames 가 되어야 함.
-            # 현재 코드는 [0:v]가 -loop 1 로 들어오므로 비디오 스트림임. -> d=1 이 맞음.
-            
-            # [Check] z_expr에서 'on' 변수가 제대로 증가하는지 확인 필요.
-            # zoompan 필터에서 on은 'current input frame'이 아니라 'current output frame of the zoompan instance'임.
-            # 입력이 동영상 스트림일 때 d=1이면 on도 매 프레임 증가함.
-            
-            # [Fix] 8K Resolution for Supersampling
-            filter_complex += (f"[v_high]zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':"
-                               f"d=1:s=7680x4320:fps={FPS}[v_zoomed];")
-            
-            # D) Downscale to Target (FHD) & Pad
-            filter_complex += (f"[v_zoomed]scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=decrease:flags=lanczos,"
-                               f"pad={TARGET_W}:{TARGET_H}:(ow-iw)/2:(oh-ih)/2,setsar=1:1[v_bg];")
+                filter_parts.append(f"[0:v]fps={FPS},setsar=1:1[v_bg]")
             
             # ========== Subtitle Filters ==========
-            last_v_label = "[v_bg]"
-            
-            # Apply overlays
-            # Input index for subs starts at 2
-            for i, (_, start_t, end_t) in enumerate(subtitle_inputs):
-                sub_idx = i + 2
-                next_v_label = f"[v_sub{i}]"
-                # enable='between(t, start, end)' -> Inclusive both sides -> Possible overlap flash
-                # Use 'gte(t,start)*lt(t,end)' for exclusive end -> Seamless transition
-                
-                # Check if this is the last one or separate to ensure coverage
-                # gte(t, S) * lt(t, E)
-                filter_complex += f"{last_v_label}[{sub_idx}:v]overlay=enable='gte(t,{start_t:.3f})*lt(t,{end_t:.3f})'[v_sub{i}];"
-                last_v_label = next_v_label
-            
-            final_v_label = last_v_label
+            final_v_label = "[v_bg]"
+            if subtitle_inputs:
+                filter_parts.append(f"{final_v_label}[2:v]overlay=format=auto[v_final]")
+                final_v_label = "[v_final]"
             
             # ========== Audio Filter ==========
-            # Volume + Trim + Resample(48k) + Fadeout
-            # [1:a] -> ... -> [a_out]
-            # atrim: duration 제한
-            
             fade_duration = 0.05
             fade_start = max(0, final_duration - fade_duration)
-            
-            # vol filter -> aresample -> afade
-            # vol: volume=1.5
             vol_val = self.volume
+            filter_parts.append(f"[1:a]volume={vol_val},atrim=duration={final_duration},aresample=48000:async=1,afade=t=out:st={fade_start}:d={fade_duration}[a_out]")
             
-            filter_complex += (f"[1:a]volume={vol_val},"
-                               f"atrim=duration={final_duration},"
-                               f"aresample=48000:async=1,"
-                               f"afade=t=out:st={fade_start}:d={fade_duration}[a_out]")
+            filter_complex = ";".join(filter_parts)
             
+            # [NEW] filter_complex script path (Fix WinError 206 & memory startup)
+            filter_script_path = os.path.join(temp_dir, f"filter_fc_{base_name}.txt")
+            with open(filter_script_path, "w", encoding='utf-8') as f:
+                f.write(filter_complex)
+            temp_files.append(filter_script_path)
+
             # ========== Final Assembly ==========
-            command.extend(["-filter_complex", filter_complex])
+            command.extend(["-filter_complex_script", filter_script_path])
             command.extend(["-map", final_v_label, "-map", "[a_out]"])
             
             # Encoding Options
-            command.extend(["-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p"])
+            command.extend(["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p"])
             command.extend(["-c:a", "aac", "-b:a", "192k"])
             command.extend(["-y", output_path])
             
@@ -809,7 +920,9 @@ class VideoMergerWorker(QThread):
             try:
                 out, err = process.communicate(timeout=final_duration*5 + 60) # 타임아웃 넉넉히
                 if process.returncode != 0:
-                    raise Exception(f"FFmpeg Error: {err}")
+                    # Show last 1000 chars of error
+                    display_err = err[-1000:] if len(err) > 1000 else err
+                    raise Exception(f"FFmpeg Error: {display_err}")
             except subprocess.TimeoutExpired:
                 process.kill()
                 raise Exception("FFmpeg Timeout")
@@ -838,6 +951,17 @@ class VideoMergerWorker(QThread):
                 try: os.remove(tmp)
                 except: pass
             return False
+
+    def fix_concat_file_local(self, path):
+        lines = []
+        with open(path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        with open(path, 'w', encoding='utf-8') as f:
+            for line in lines:
+                if line.startswith('file'):
+                    f.write(line.replace('\\', '/'))
+                else:
+                    f.write(line)
 
     def get_timing_from_metadata(self, meta_path, sub_list=None):
         """JSON 메타데이터를 사용하여 텍스트 세그먼트들과 싱크 매칭
@@ -919,6 +1043,49 @@ class VideoMergerWorker(QThread):
         except Exception as e:
             print(f"매칭 오류 ({meta_path}): {e}")
             return []
+
+    def parse_srt(self, srt_path):
+        segments = []
+        try:
+            with open(srt_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except UnicodeDecodeError:
+            with open(srt_path, 'r', encoding='cp949') as f:
+                content = f.read()
+            
+        blocks = content.strip().split('\n\n')
+        for block in blocks:
+            lines = block.strip().split('\n')
+            if len(lines) >= 3:
+                try:
+                    idx = int(lines[0].strip())
+                    time_line = lines[1].strip()
+                    text = " ".join(lines[2:])
+                    
+                    if '-->' in time_line:
+                        s_str, e_str = time_line.split('-->')
+                        start = self.parse_time(s_str.strip())
+                        end = self.parse_time(e_str.strip())
+                        
+                        segments.append({
+                            'index': idx,
+                            'start': start,
+                            'end': end,
+                            'text': text
+                        })
+                except:
+                    pass
+        return segments
+
+    def parse_time(self, t_str):
+        t_str = t_str.replace(',', '.')
+        parts = t_str.split(':')
+        if len(parts) == 3:
+            h = float(parts[0])
+            m = float(parts[1])
+            s = float(parts[2])
+            return h*3600 + m*60 + s
+        return 0.0
 
     def create_text_image(self, text, size):
         # 폰트 이미지 캐싱
@@ -1946,77 +2113,76 @@ class MainApp(QWidget):
 
     def initUI(self):
         self.setWindowTitle("YouTube Video Creator Master")
-        self.setGeometry(200, 100, 900, 850)
+        self.setGeometry(200, 100, 950, 850) # 폭을 약간 늘림 (2단 탭 버튼 대비)
         layout = QVBoxLayout()
 
-        # 메인 레이아웃을 탭 위젯으로 변경
         # 메인 레이아웃을 커스텀 탭 위젯으로 변경
         self.tabs = CustomTabWidget()
-        
         layout.addWidget(self.tabs)
 
-        # 탭 1: GenSpark Image
+        # ========== 1단 (Upper Row) ==========
+        
+        # 1. GenSpark Image
         self.tab1 = QWidget()
         self.initTab1()
-        self.tabs.addTab(self.tab1, "GenSpark Image")
+        self.tabs.addTab(self.tab1, "Ganspark Image")
 
-
-        # 탭 1-2: ImageFX Image
+        # 2. ImageFX Image
         self.tab_fx = QWidget()
         self.initTabImageFX()
         self.tabs.addTab(self.tab_fx, "ImageFX Image")
 
-        # 탭 2: ElevenLabs TTS
+        # 3. ElevenLabs TTS
         self.tab2 = QWidget()
         self.initTab2()
         self.tabs.addTab(self.tab2, "ElevenLabs TTS")
 
-        # 탭 3: Video Composite
+        # 4. Video Composite
         self.tab3 = QWidget()
         self.initTab3()
         self.tabs.addTab(self.tab3, "Video Composite")
 
-        # 탭 4: Video Concat
-        self.tab4 = QWidget()
-        self.initTab4()
-        self.tabs.addTab(self.tab4, "Video Concat")
-        
-        # 탭 5: Single Video
-        self.tab5 = QWidget()
-        self.initTab5()
-        self.tabs.addTab(self.tab5, "Video Effects")
-
-        # 탭 6: Video Dubbing
+        # 5. Video Dubbing
         self.tab6 = QWidget()
         self.initTab6()
         self.tabs.addTab(self.tab6, "Video Dubbing")
 
-        # 탭 6-2: Audio Normalization
-        self.tab_audio_normal = QWidget()
-        self.initTabAudioNormal()
-        self.tabs.addTab(self.tab_audio_normal, "Audio Normal")
+        # 6. Video Effects
+        self.tab5 = QWidget()
+        self.initTab5()
+        self.tabs.addTab(self.tab5, "Video Effects")
 
-        # 탭 7 (New): FTP Upload
-        self.tab_ftp = QWidget()
-        self.initTabFTP()
-        self.tabs.addTab(self.tab_ftp, "FTP Upload")
+        # ========== 2단 (Lower Row) ==========
 
+        # 7. Video Concat
+        self.tab4 = QWidget()
+        self.initTab4()
+        self.tabs.addTab(self.tab4, "Video Concat")
 
-        # 탭 8: YouTube Analysis
-        self.tab7 = QWidget()
-        self.initTab7()
-        self.tabs.addTab(self.tab7, "YouTube 분석")
-        
-        # 탭 9: Audio Transcribe
+        # 8. Audio Transcribe
         self.tab_transcribe = QWidget()
         self.initTabAudioTranscribe()
         self.tabs.addTab(self.tab_transcribe, "Audio Transcribe")
-        
-        # 탭 10: Audio To Video
+
+        # 9. Audio To Video
         self.tab_audio_video = QWidget()
         self.initTabAudioToVideo()
         self.tabs.addTab(self.tab_audio_video, "Audio To Video")
 
+        # 10. YouTube 분석
+        self.tab7 = QWidget()
+        self.initTab7()
+        self.tabs.addTab(self.tab7, "YouTube 분석")
+
+        # 11. FTP Upload
+        self.tab_ftp = QWidget()
+        self.initTabFTP()
+        self.tabs.addTab(self.tab_ftp, "FTP Upload")
+
+        # 12. Audio Normal
+        self.tab_audio_normal = QWidget()
+        self.initTabAudioNormal()
+        self.tabs.addTab(self.tab_audio_normal, "Audio Normal")
 
         self.setLayout(layout)
 
@@ -4016,6 +4182,7 @@ class MainApp(QWidget):
             input_dir, output_dir, style, volume, trim_end, effect_config
         )
         self.batch_eff_worker.log_signal.connect(self.single_log.append)
+        self.batch_eff_worker.finished.connect(self.on_batch_eff_finished)
         self.batch_eff_worker.error.connect(lambda e: [self.single_log.append(f"❌ {e}"), self.btn_start_single.setEnabled(True)])
         self.batch_eff_worker.start()
 
@@ -4078,13 +4245,26 @@ class MainApp(QWidget):
         self.atv_worker.error.connect(self.on_atv_error)
         self.atv_worker.start()
         
-    def on_atv_finished(self, msg):
-        self.atv_log.append(f"🏁 {msg}")
+    def on_atv_finished(self, msg, elapsed):
+        h = int(elapsed // 3600)
+        m = int((elapsed % 3600) // 60)
+        s = int(elapsed % 60)
+        time_str = f" ({h:02d}:{m:02d}:{s:02d})"
+        
+        self.atv_log.append(f"🏁 {msg}{time_str}")
         self.btn_atv_start.setEnabled(True)
         
     def on_atv_error(self, err):
         self.atv_log.append(f"❌ 오류: {err}")
         self.btn_atv_start.setEnabled(True)
+
+    def on_batch_eff_finished(self, msg, elapsed):
+        h = int(elapsed // 3600)
+        m = int((elapsed % 3600) // 60)
+        s = int(elapsed % 60)
+        time_str = f" ({h:02d}:{m:02d}:{s:02d})"
+        self.single_log.append(f"🏁 {msg}{time_str}")
+        self.btn_start_single.setEnabled(True)
 
     def initTabAudioTranscribe(self):
         layout = QVBoxLayout()
@@ -4281,43 +4461,88 @@ class BatchVideoEffectWorker(VideoMergerWorker):
             total = len(mp3_files)
             success_count = 0
             
+            # 1. 큐 준비 (Task 생성 및 효과 배정)
+            import random
+            tasks = []
+            
+            # 효과 타입 다양화 (ZoomIn, ZoomOut, PanLR, PanRL)
+            effect_types = []
+            if self.effect_config and self.effect_config.get('random'):
+                # 4가지 효과를 골고루 섞어서 리스트 생성
+                base_types = [
+                    {'type': 1, 'start_scale': 1.0, 'end_scale': 1.15}, # Zoom In
+                    {'type': 1, 'start_scale': 1.15, 'end_scale': 1.0}, # Zoom Out
+                    {'type': 2, 'start_scale': 1.1}, # Pan L->R
+                    {'type': 3, 'start_scale': 1.1}  # Pan R->L
+                ]
+                # 파일 수만큼 충분히 리스트 확장 후 섞기
+                while len(effect_types) < len(mp3_files):
+                    shuffled_base = base_types.copy()
+                    random.shuffle(shuffled_base)
+                    effect_types.extend(shuffled_base)
+            
+            self.log_signal.emit("📋 [작업 계획] 효과 배정 결과:")
             for idx, mp3 in enumerate(mp3_files):
                 base_name = os.path.splitext(mp3)[0]
                 audio_path = os.path.join(self.input_dir, mp3)
                 output_path = os.path.join(self.output_dir, f"{base_name}.mp4")
                 
-                # 이미지 찾기 (같은 폴더 내)
+                # 이미지 찾기
                 img_path = None
                 for ext in ['.png', '.jpg', '.jpeg', '.webp']:
                     check = os.path.join(self.input_dir, base_name + ext)
                     if os.path.exists(check):
                         img_path = check
                         break
-                        
+                
                 if not img_path:
-                    self.log_signal.emit(f"⚠️ [{idx+1}/{total}] 이미지 없음, 건너뜀: {base_name}")
+                    self.log_signal.emit(f"   ⚠️ [{base_name}] 이미지 없음 (건너뜀)")
                     continue
+
+                # 효과 배정 (랜덤 모드일 경우 준비된 리스트에서 추출)
+                current_effect = None
+                if self.effect_config:
+                    if self.effect_config.get('random'):
+                        current_effect = self.effect_config.copy()
+                        assigned = effect_types[idx]
+                        current_effect.update(assigned)
+                        
+                        eff_name = "Zoom In" if assigned['type']==1 and assigned['end_scale'] > 1.0 else \
+                                   "Zoom Out" if assigned['type']==1 else \
+                                   "Pan L->R" if assigned['type']==2 else "Pan R->L"
+                        self.log_signal.emit(f"   - {base_name}: {eff_name}")
+                    else:
+                        current_effect = self.effect_config.copy()
                 
-                self.log_signal.emit(f"🎬 [{idx+1}/{total}] 처리 중: {base_name}")
+                tasks.append((img_path, audio_path, output_path, base_name, current_effect))
+
+            if not tasks:
+                self.error.emit("처리할 유효한 태스크가 없습니다.")
+                return
+
+            self.log_signal.emit(f"🚀 총 {len(tasks)}개의 영상 처리를 시작합니다. (병렬 처리 모드: 2개씩)")
+            
+            # 2. ThreadPoolExecutor 병렬 실행
+            import multiprocessing
+            import concurrent.futures
+            max_workers = min(2, multiprocessing.cpu_count()) # 8K 고화질 처리로 인해 메모리 보호차원 2개 제한
+            success_count = 0
+            
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # {future: (base_name, output_path)}
+                future_to_info = {executor.submit(self.process_single_video, task): task[3] for task in tasks}
                 
-                # [NEW] 랜덤 효과 로직
-                if self.effect_config and self.effect_config.get('random'):
-                    import random
-                    new_type = random.randint(1, 3) # 1~3 (Zoom, PanLR, PanRL)
-                    self.effect_config['type'] = new_type
-                    
-                    eff_names = ["None", "Zoom", "Pan(L->R)", "Pan(R->L)"]
-                    if 0 <= new_type < len(eff_names):
-                        self.log_signal.emit(f"   🎲 랜덤 효과 적용: {eff_names[new_type]}")
-                
-                # 자막 자동 로드 (부모 클래스가 JSON 자동 로드함)
-                # Task 준비 (img, audio, output, base_name, manual_subs=None)
-                task = (img_path, audio_path, output_path, base_name, None)
-                
-                # process_single_video 호출
-                res = self.process_single_video(task)
-                if res:
-                    success_count += 1
+                for future in concurrent.futures.as_completed(future_to_info):
+                    task_base = future_to_info[future]
+                    try:
+                        res = future.result()
+                        if res:
+                            success_count += 1
+                            # 성공 로그는 process_single_video 내부나 여기서 출력
+                        else:
+                            self.log_signal.emit(f"❌ [{task_base}] 처리 실패")
+                    except Exception as e:
+                        self.log_signal.emit(f"❌ [{task_base}] 오류 발생: {e}")
             
             elapsed = time.time() - start_time
             self.finished.emit(f"전체 작업 완료: {success_count}/{total} 성공", elapsed)
@@ -4837,7 +5062,7 @@ class AudioTranscriberWorker(QThread):
 
 class AudioToVideoWorker(QThread):
     log_signal = pyqtSignal(str)
-    finished = pyqtSignal(str)
+    finished = pyqtSignal(str, float)
     error = pyqtSignal(str)
     
     def __init__(self, target_dir, style):
@@ -4848,6 +5073,8 @@ class AudioToVideoWorker(QThread):
 
     def run(self):
         import shutil
+        import time
+        start_time = time.time()
         try:
             # Create Temp Dir
 
@@ -4879,7 +5106,8 @@ class AudioToVideoWorker(QThread):
                 srt_file = base_name + ".srt"
                 srt_path = os.path.join(self.target_dir, srt_file)
                 mp3_path = os.path.join(self.target_dir, mp3)
-                out_path = os.path.join(self.target_dir, base_name + ".mp4")
+                # 최종 mp4 파일명을 final_video.mp4로 고정
+                out_path = os.path.join(self.target_dir, "final_video.mp4")
                 
                 if not os.path.exists(srt_path):
                     self.log_signal.emit(f"⚠️ SRT 없음 건너뜀: {srt_file}")
@@ -4895,136 +5123,208 @@ class AudioToVideoWorker(QThread):
                     self.log_signal.emit(f"   ⚠️ 오디오 길이 확인 불가: {mp3}")
                     continue
 
-                # 2. Parse SRT for Image Plan
+                # 2. Parse SRT for Subtitles and Images
                 segments = self.parse_srt(srt_path)
+
+                # [Restore] 이미지 처리 로직 (사용자 요청: SRT 인덱스번호와 매칭)
+                TARGET_W, TARGET_H = 1920, 1080
+                FPS = 30
                 
-                # 3. Create Concat List needed for FFMPEG
+                # 3. Create Concat List for Images
                 concat_list_path = os.path.join(self.temp_sub_dir, f"inputs_{base_name}.txt")
                 
-                # Logic: Find images
+                # Logic: Find images matching SRT indices
                 checkpoints = []
                 for seg in segments:
                     idx = seg['index']
                     t = seg['start']
-                    img_name = f"{idx}.jpg"
-                    if not os.path.exists(os.path.join(self.target_dir, img_name)):
-                         if os.path.exists(os.path.join(self.target_dir, f"{idx}.png")):
-                             img_name = f"{idx}.png"
-                         elif os.path.exists(os.path.join(self.target_dir, f"{idx}.webp")):
-                             img_name = f"{idx}.webp"
+                    img_name = None
+                    for ext in ['.jpg', '.png', '.webp', '.jpeg']:
+                        check = os.path.join(self.target_dir, f"{idx}{ext}")
+                        if os.path.exists(check):
+                            img_name = check
+                            break
                     
-                    full_img_path = os.path.join(self.target_dir, img_name)
-                    if os.path.exists(full_img_path):
-                        checkpoints.append((t, full_img_path))
+                    if img_name:
+                        checkpoints.append((t, img_name))
                 
                 checkpoints.sort(key=lambda x: x[0])
                 
-                # Write Concat File
-                # Format:
-                # file 'path'
-                # duration 5.0
-                if not checkpoints:
-                    # Black or default?
-                    # Create a dummy black image?
-                    # Or just fail? Let's assume user wants at least one image.
-                    # Create black image using PIL and save
-                    dummy_img = os.path.join(self.temp_sub_dir, "black.jpg")
-                    if not os.path.exists(dummy_img):
-                        from PIL import Image
-                        Image.new('RGB', (1920, 1080), (0,0,0)).save(dummy_img)
-                    checkpoints = [(0.0, dummy_img)]
+                # 4. Process Images to Ensure Unified Resolution (1920x1080)
+                unified_img_dir = os.path.join(self.temp_sub_dir, f"scaled_{base_name}")
+                os.makedirs(unified_img_dir, exist_ok=True)
+                
+                processed_checkpoints = []
+                for t, img_p in checkpoints:
+                    img_name_only = os.path.basename(img_p)
+                    scaled_p = os.path.join(unified_img_dir, f"proc_{img_name_only}.jpg")
+                    try:
+                        with Image.open(img_p) as test_img:
+                            if test_img.mode != 'RGB': test_img = test_img.convert('RGB')
+                            iw, ih = test_img.size
+                            aspect = iw / ih
+                            target_aspect = TARGET_W / TARGET_H
+                            if aspect > target_aspect:
+                                new_w = TARGET_W; new_h = int(TARGET_W / aspect)
+                            else:
+                                new_h = TARGET_H; new_w = int(TARGET_H * aspect)
+                            resized = test_img.resize((new_w, new_h), Image.LANCZOS)
+                            final_bg = Image.new('RGB', (TARGET_W, TARGET_H), (0, 0, 0))
+                            offset = ((TARGET_W - new_w) // 2, (TARGET_H - new_h) // 2)
+                            final_bg.paste(resized, offset)
+                            # PNG로 저장하여 검정 배경(PNG)과의 포맷 불일치 방지
+                            final_bg.save(scaled_p, "PNG")
+                            processed_checkpoints.append((t, scaled_p))
+                    except:
+                        pass
+                
+                # Sync Fix: Ensure timeline starts at 0.0
+                if processed_checkpoints:
+                    processed_checkpoints.sort(key=lambda x: x[0])
+                    if processed_checkpoints[0][0] > 0.001:
+                        black_p = os.path.join(self.temp_sub_dir, "black_gap_start.png")
+                        if not os.path.exists(black_p):
+                            Image.new('RGB', (TARGET_W, TARGET_H), (0,0,0)).save(black_p)
+                        processed_checkpoints.insert(0, (0.0, black_p))
+                else:
+                    black_p = os.path.join(self.temp_sub_dir, "black_full.png")
+                    if not os.path.exists(black_p):
+                        Image.new('RGB', (TARGET_W, TARGET_H), (0,0,0)).save(black_p)
+                    processed_checkpoints = [(0.0, black_p)]
 
+                # Write Concat List
                 with open(concat_list_path, "w", encoding='utf-8') as f:
-                    last_time = 0.0
-                    last_img = checkpoints[0][1] # Default start
-                    
-                    # If first checkpoint is > 0, we need a start image (black or first)
-                    if checkpoints[0][0] > 0:
-                         # Use black or last known? 
-                         # User requested specific track matching. 0~start is gap.
-                         # Use black for gap?
-                         # Creating black.jpg
-                         black_img = os.path.join(self.temp_sub_dir, "black.jpg")
-                         if not os.path.exists(black_img):
-                            from PIL import Image
-                            Image.new('RGB', (1920, 1080), (0,0,0)).save(black_img)
-                         
-                         f.write(f"file '{black_img}'\n")
-                         f.write(f"duration {checkpoints[0][0]}\n")
-                         last_time = checkpoints[0][0]
-
-                    for i, (t, img_path) in enumerate(checkpoints):
-                        # Duration of PREVIOUS clip is (t - last_at_time) ??
-                        # No, concat format:
-                        # file 'A'
-                        # duration X (how long A is shown)
-                        
-                        # So when we hit checkpoint B at 't', image A was shown from A_start to t.
-                        # Wait, logic check:
-                        # Checkpoints: [(0.0, 1.jpg), (10.0, 2.jpg)]
-                        # At 0.0, 1.jpg starts.
-                        # At 10.0, 2.jpg starts.
-                        # So 1.jpg duration is 10.0.
-                        
-                        if i < len(checkpoints) - 1:
-                            next_t = checkpoints[i+1][0]
-                            dur = next_t - t
-                            f.write(f"file '{img_path}'\n")
-                            f.write(f"duration {dur:.2f}\n")
+                    for i, (t, img_p) in enumerate(processed_checkpoints):
+                        safe_p = img_p.replace("\\", "/")
+                        if i < len(processed_checkpoints) - 1:
+                            dur = processed_checkpoints[i+1][0] - t
+                            f.write(f"file '{safe_p}'\n")
+                            f.write(f"duration {dur:.3f}\n")
                         else:
-                            # Last image until audio end
                             dur = duration - t
-                            if dur < 0: dur = 0.1 # Safety
-                            f.write(f"file '{img_path}'\n")
-                            f.write(f"duration {dur:.2f}\n")
-                            
-                    # Important: Concat demuxer quirk: add the last file again without duration to ensure the previous duration holds?
-                    # Or just file 'X' duration 'Y'.
-                    # For safety, repeat last entry if needed, but usually duration is enough.
+                            if dur < 0.1: dur = 0.5
+                            f.write(f"file '{safe_p}'\n")
+                            f.write(f"duration {dur:.3f}\n")
+                    # FFmpeg requirement: repeat last file
+                    f.write(f"file '{processed_checkpoints[-1][1].replace('\\', '/')}'\n")
                 
-                # 4. Generate ASS Subtitle
-                # To avoid complex path escaping issues, we create a temporary ASS file in base dir
-                # or use very simple relative path.
-                # Let's use a temp name in target_dir for the moment, then delete it?
-                # Or just rely on relative path 'temp_subs/...' which worked but maybe font issue.
+                self.fix_concat_file(concat_list_path)
+
                 
-                ass_filename = f"{base_name}.ass"
-                ass_path = os.path.join(self.target_dir, ass_filename) # Put in root for easy access
-                self.create_ass_file(srt_path, ass_path, self.style)
+                # 5. Generate Subtitle PNGs (Identical to Video Composite)
+                FPS = 30
+                subtitle_inputs = [] # (path, start_t, end_t)
+                temp_files = []
                 
-                # 5. Run FFmpeg
-                # Since ass_path is in target_dir and we run with cwd=target_dir, we can just use filename.
+                if segments:
+                    for idx_s, seg in enumerate(segments):
+                        text = seg['text']
+                        start_t = seg['start']
+                        end_t = seg['end']
+                        
+                        if start_t >= duration: continue
+                        real_end = min(end_t, duration)
+                        if real_end <= start_t:
+                            real_end = min(start_t + 3.0, duration)
+                        if real_end <= start_t: continue
+                        
+                        # Gap Filling
+                        if idx_s < len(segments) - 1:
+                            next_start = segments[idx_s+1]['start']
+                            if 0 < (next_start - real_end) < 0.5:
+                                real_end = next_start
+                                
+                        rgba_arr = self.create_text_image(text, (TARGET_W, TARGET_H))
+                        sub_filename = f"sub_{base_name}_{idx_s}.png"
+                        sub_path = os.path.join(self.temp_sub_dir, sub_filename)
+                        
+                        result_img = Image.fromarray(rgba_arr, 'RGBA')
+                        result_img.save(sub_path)
+                        temp_files.append(sub_path)
+                        subtitle_inputs.append((sub_path, start_t, real_end))
+
+                # 6. Run FFmpeg
+                cmd = [ffmpeg_exe, "-y", "-fflags", "+genpts"]
+                # Input 0: Image Concat List
+                cmd.extend(["-f", "concat", "-safe", "0", "-i", concat_list_path])
+                cmd.extend(["-i", mp3_path]) # Input 1 (Audio)
+                # [Input 2] Subtitles Concat
+                concat_sub_list_p = os.path.join(self.temp_sub_dir, f"subs_{base_name}.txt")
+                transparent_p = os.path.join(self.temp_sub_dir, "transparent.png")
+                if not os.path.exists(transparent_p):
+                    Image.new('RGBA', (TARGET_W, TARGET_H), (0,0,0,0)).save(transparent_p)
+
+                with open(concat_sub_list_p, "w", encoding='utf-8') as f:
+                    last_time_s = 0.0
+                    for s_p, s_t, e_t in subtitle_inputs:
+                        gap = s_t - last_time_s
+                        if gap > 0.001:
+                            f.write(f"file '{transparent_p}'\n")
+                            f.write(f"duration {gap:.3f}\n")
+                        dur = e_t - s_t
+                        if dur < 0.001: dur = 0.1
+                        f.write(f"file '{s_p}'\n")
+                        f.write(f"duration {dur:.3f}\n")
+                        last_time_s = e_t
+                    if last_time_s < duration:
+                        f.write(f"file '{transparent_p}'\n")
+                        f.write(f"duration {duration - last_time_s:.3f}\n")
+                    if subtitle_inputs:
+                        # FFmpeg concat demuxer: Last entry should have a small duration or be repeated for EOF
+                        f.write(f"file '{subtitle_inputs[-1][0]}'\n")
+                        f.write(f"duration 0.1\n") # Minimal duration to trigger EOF
                 
-                cmd = [
-                    ffmpeg_exe, "-y",
-                    "-f", "concat", "-safe", "0", "-i", concat_list_path,
-                    "-i", mp3_path,
-                    "-vf", f"ass='{ass_filename}'",
-                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-                    "-c:a", "aac", "-b:a", "192k",
-                    "-pix_fmt", "yuv420p",
-                    out_path
-                ]
+                self.fix_concat_file(concat_sub_list_p)
+                cmd.extend(["-f", "concat", "-safe", "0", "-i", concat_sub_list_p])
+                
+                # 이미지 스트림과 자막 스트림의 포맷을 yuv420p로 강제 통일하여 메모리 누수 방지
+                filter_parts = [f"[0:v]format=yuv420p,fps={FPS},setsar=1:1[v_bg]"]
+                final_v_label = "[v_bg]"
+                if subtitle_inputs:
+                    # overlay 가동 시 포맷 지정으로 안정성 향상
+                    filter_parts.append(f"[2:v]format=yuva420p,fps={FPS},setsar=1:1[v_sub]")
+                    filter_parts.append(f"{final_v_label}[v_sub]overlay=format=yuv420[v_final]")
+                    final_v_label = "[v_final]"
+                
+                filter_parts.append(f"[1:a]volume=1.0,atrim=duration={duration},aresample=48000:async=1[a_out]")
+                filter_complex = ";".join(filter_parts)
+                
+                # [NEW] filter_complex script path (Fix WinError 206)
+                filter_script_p = os.path.join(self.temp_sub_dir, f"filter_{base_name}.txt")
+                with open(filter_script_p, "w", encoding='utf-8') as f:
+                    f.write(filter_complex)
+                temp_files.append(filter_script_p)
+
+                cmd.extend(["-filter_complex_script", filter_script_p])
+                cmd.extend(["-map", final_v_label, "-map", "[a_out]"])
+                
+                # Encoding Options (Memory & Stability Optimized)
+                cmd.extend(["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p"])
+                cmd.extend(["-max_muxing_queue_size", "1024", "-threads", "0"]) # 큐 사이즈 확장으로 버퍼 오류 방지
+                cmd.extend(["-fps_mode", "cfr"])
+                cmd.extend(["-c:a", "aac", "-b:a", "192k"])
+                cmd.append(out_path)
                 
                 creation_flags = 0x08000000 if os.name == 'nt' else 0
+                self.log_signal.emit(f"   🚀 인코딩 중... (Video Composite 스타일 자막 적용)")
                 
-                self.log_signal.emit(f"   🚀 인코딩 중... (FFmpeg Native)")
-                
-                # Execute in target_dir to make relative paths work
                 res = subprocess.run(
                     cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     check=False, creationflags=creation_flags, cwd=self.target_dir
                 )
                 
                 if res.returncode != 0:
-                    self.log_signal.emit(f"   ⚠️ FFmpeg Warning: {res.stderr.decode('utf-8')[:300]}...")
+                    err_msg = res.stderr.decode('utf-8', errors='ignore')
+                    # Show last 1000 chars to skip header and see actual error
+                    display_err = err_msg[-1000:] if len(err_msg) > 1000 else err_msg
+                    self.log_signal.emit(f"   ❌ FFmpeg 오류: {display_err}")
+                else:
+                    self.log_signal.emit(f"   ✅ 완료: {base_name}.mp4")
+                    count += 1
                 
-                self.log_signal.emit(f"   ✅ 완료: {base_name}.mp4")
-                count += 1
-                
-                # Cleanup local ASS
-                if os.path.exists(ass_path):
-                    try: os.remove(ass_path)
+                # Cleanup sub PNGs
+                for tmp in temp_files:
+                    try: os.remove(tmp)
                     except: pass
             
             # Cleanup Temp Dir
@@ -5034,9 +5334,10 @@ class AudioToVideoWorker(QThread):
                     self.log_signal.emit("   🧹 임시 파일 삭제 완료")
                 except Exception as e:
                     self.log_signal.emit(f"   ⚠️ 임시 폴더 삭제 실패: {e}")
-
-            self.finished.emit(f"작업 완료: 총 {count}개 영상 생성")
-
+ 
+            elapsed = time.time() - start_time
+            self.finished.emit(f"작업 완료: 총 {count}개 영상 생성", elapsed)
+ 
         except Exception as e:
             self.error.emit(f"치명적 오류: {e}")
             import traceback
@@ -5046,6 +5347,100 @@ class AudioToVideoWorker(QThread):
             if os.path.exists(self.temp_sub_dir):
                 try: shutil.rmtree(self.temp_sub_dir)
                 except: pass
+ 
+    def create_text_image(self, text, size):
+        # 폰트 이미지 캐싱
+        if not hasattr(self, '_text_cache'): self._text_cache = {}
+        cache_key = f"{text}_{size}_{self.style['font_family']}_{self.style['font_size']}_{self.style['text_color']}_{self.style['outline_color']}_{self.style['bg_color']}"
+        if cache_key in self._text_cache:
+            return self._text_cache[cache_key]
+
+        width, height = size
+        image = QImage(width, height, QImage.Format_RGBA8888)
+        image.fill(Qt.transparent)
+        
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.TextAntialiasing)
+        
+        font_family = self.style['font_family']
+        base_font_size = self.style['font_size']
+        
+        min_dim = min(width, height)
+        scale_factor = min_dim / 1024.0
+        scaled_font_size = int(base_font_size * scale_factor)
+        
+        font = QFont(font_family)
+        font.setPixelSize(scaled_font_size)
+        
+        if not any(kw in font_family.lower() for kw in ['bold', 'heavy', 'black', 'eb', 'b']):
+            font.setBold(True)
+        else:
+            font.setBold(False)
+            
+        painter.setFont(font)
+        
+        margin_lr = int(40 * scale_factor)
+        max_rect = QRect(margin_lr, 0, width - (margin_lr * 2), height) 
+        text_rect = painter.boundingRect(max_rect, Qt.AlignCenter | Qt.TextWordWrap, text)
+        
+        margin_bottom = int(height * 0.05)
+        padding_h = int(40 * scale_factor)
+        padding_v = int(12 * scale_factor)
+        bg_rect = text_rect.adjusted(-padding_h, -padding_v, padding_h, padding_v)
+        
+        box_h = bg_rect.height()
+        target_bottom = height - margin_bottom
+        target_top = target_bottom - box_h
+        
+        dy = target_top - bg_rect.top()
+        bg_rect.translate(0, dy)
+        text_rect.translate(0, dy)
+
+        if self.style.get('use_bg', True) and self.style['bg_color'] != "Transparent":
+            color = QColor(self.style['bg_color'])
+            opacity = self.style.get('bg_opacity', 255)
+            color.setAlpha(opacity)
+            painter.setBrush(QBrush(color))
+            painter.setPen(Qt.NoPen)
+            radius = int(15 * scale_factor)
+            painter.drawRoundedRect(bg_rect, radius, radius)
+
+        text_draw_area = bg_rect.translated(0, 6)
+        
+        if self.style.get('use_outline', True) and self.style['outline_color'] and self.style['outline_color'].lower() != "none":
+            painter.setPen(QColor(self.style['outline_color']))
+            outline_width = int(6 * scale_factor)
+            if outline_width < 2: outline_width = 2
+            steps = 24 
+            import math
+            for i in range(steps):
+                angle = 2 * math.pi * i / steps
+                dx = int(round(outline_width * math.cos(angle)))
+                dy = int(round(outline_width * math.sin(angle)))
+                painter.drawText(text_draw_area.translated(dx, dy), Qt.AlignCenter | Qt.TextWordWrap, text)
+            
+            if outline_width > 3:
+                inner_width = outline_width / 2.0
+                for i in range(steps):
+                    angle = 2 * math.pi * i / steps
+                    dx = int(round(inner_width * math.cos(angle)))
+                    dy = int(round(inner_width * math.sin(angle)))
+                    painter.drawText(text_draw_area.translated(dx, dy), Qt.AlignCenter | Qt.TextWordWrap, text)
+
+        painter.setPen(QColor(self.style['text_color']))
+        painter.drawText(text_draw_area, Qt.AlignCenter | Qt.TextWordWrap, text)
+        painter.end()
+        
+        ptr = image.bits()
+        ptr.setsize(image.byteCount())
+        import numpy as np
+        arr = np.frombuffer(ptr, np.uint8).copy().reshape((height, width, 4))
+        
+        if len(self._text_cache) > 50:
+            self._text_cache.clear()
+        self._text_cache[cache_key] = arr
+        return arr
 
     def get_audio_duration(self, ffmpeg_exe, mp3_path):
         # Use ffprobe logic or simple ffmpeg -i call parsing
@@ -5130,94 +5525,6 @@ class AudioToVideoWorker(QThread):
             s = float(parts[2])
             return h*3600 + m*60 + s
         return 0.0
-
-    def hex_to_ass_color(self, color_str):
-        # Convert #RRGGBB or names to &H00BBGGRR
-        # Simple map for common names
-        map_name = {
-            'black': '&H00000000', 'white': '&H00FFFFFF', 'red': '&H000000FF', 
-            'green': '&H0000FF00', 'blue': '&H00FF0000', 'yellow': '&H0000FFFF', 'cyan': '&H00FFFF00', 'magenta': '&H00FF00FF',
-            'transparent': '&HFF000000'
-        }
-        if color_str.lower() in map_name:
-            return map_name[color_str.lower()]
-            
-        if color_str.startswith('#'):
-            h = color_str.lstrip('#')
-            if len(h) == 6:
-                r, g, b = h[0:2], h[2:4], h[4:6]
-                return f"&H00{b}{g}{r}" # BGR format
-        
-        return '&H00FFFFFF' # Default white
-
-    def create_ass_file(self, srt_path, ass_path, style):
-        # Convert SRT to ASS with style
-        # 1. Header
-        
-        # Font Handling: ASS needs Family Name, not File Path.
-        # If user passed a file path or name, we try to use a safe Korean font if implied.
-        raw_font = style.get('font_family', 'Arial')
-        font_name = 'Malgun Gothic' # Default safe
-        
-        # If raw_font looks like a simple name (no path separators), use it.
-        # If it has path (e.g. D:\fonts\A.ttf), extract name 'A' but it might not be the family name.
-        # Just fallback to Malgun Gothic or Arial for stability.
-        if os.sep not in raw_font and '/' not in raw_font and not raw_font.lower().endswith('.ttf'):
-            font_name = raw_font
-            
-        font_size = style.get('font_size', 60)
-        primary = self.hex_to_ass_color(style.get('text_color', 'white'))
-        outline = self.hex_to_ass_color(style.get('outline_color', 'black'))
-        back = self.hex_to_ass_color(style.get('bg_color', 'black'))
-        
-        border_style = 1 # Outline
-        border_width = 2
-        
-        if not style.get('use_outline', False):
-            border_width = 0
-            
-        # If BG used, we might need OpaqueBox (BorderStyle=3)
-        if style.get('use_bg', False):
-             border_style = 3
-             if style.get('bg_color') == 'Transparent':
-                  pass 
-             else:
-                  # Use back color for box
-                  pass
-        
-        header = f"""[Script Info]
-ScriptType: v4.00+
-Collisions: Normal
-PlayResX: 1920
-PlayResY: 1080
-WrapStyle: 1
-
-[V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font_name},{font_size},{primary},&H000000FF,{outline},{back},0,0,0,0,100,100,0,0,{border_style},{border_width},0,2,10,10,100,1
-
-[Events]
-Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-"""
-        events = []
-        segments = self.parse_srt(srt_path)
-        for seg in segments:
-             # Convert time seconds to H:MM:SS.cs
-             start = self.sec_to_ass_time(seg['start'])
-             end = self.sec_to_ass_time(seg['end'])
-             text = seg['text'].replace('\n', '\\N')
-             events.append(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}")
-             
-        with open(ass_path, "w", encoding='utf-8-sig') as f:
-            f.write(header + "\n".join(events))
-
-    def sec_to_ass_time(self, seconds):
-        h = int(seconds // 3600)
-        m = int((seconds % 3600) // 60)
-        s = int(seconds % 60)
-        cs = int((seconds - int(seconds)) * 100)
-        return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
-
 
 
 if __name__ == '__main__':
