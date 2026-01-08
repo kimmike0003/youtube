@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QTextEdit,
                              QPushButton, QLabel, QFileDialog, QHBoxLayout, 
                              QTabWidget, QComboBox, QSlider, QSpinBox, QGroupBox, QDoubleSpinBox, 
                              QFormLayout, QLineEdit, QGridLayout, QCheckBox, QMessageBox,
-                             QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView)
+                             QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QStackedWidget)
 import json
 import urllib.request
 import urllib.parse
@@ -185,395 +185,6 @@ class GenSparkMultiTabWorker(QThread):
         try:
             return driver.execute_script(script, old_srcs)
         except:
-            return None
-
-class NanoBananaMultiTabWorker(QThread):
-    progress = pyqtSignal(str)
-    log_signal = pyqtSignal(str) 
-    finished = pyqtSignal(str, float)
-    error = pyqtSignal(str)
-
-    def copy_to_clipboard(self, text):
-        try:
-            import pyperclip
-            pyperclip.copy(text)
-        except ImportError:
-            pass
-
-    def __init__(self, file_path, items, driver, custom_target_dir=None):
-        super().__init__()
-        self.file_path = file_path
-        self.items = items
-        self.driver = driver
-        
-        if custom_target_dir:
-            self.target_dir = custom_target_dir
-        else:
-            base_name = os.path.splitext(os.path.basename(file_path))[0]
-            self.target_dir = os.path.join(r"D:\ai\image", base_name)
-            
-        os.makedirs(self.target_dir, exist_ok=True)
-
-    def run(self):
-        start_timestamp = time.time()
-        try:
-            if len(self.driver.window_handles) < 2:
-                self.error.emit("❌ 오류: 브라우저 탭이 2개 미만입니다. 탭을 추가해주세요.")
-                return
-
-            tabs = self.driver.window_handles[:2]
-            wait = WebDriverWait(self.driver, 20)
-
-            total = len(self.items)
-            tab_status = {tabs[0]: None, tabs[1]: None}
-            tab_old_srcs = {tabs[0]: [], tabs[1]: []}
-            
-            processed_count = 0
-            item_idx = 0
-            failed_items = []
-
-            dumped = False
-
-            self.is_running = True
-            while processed_count < total and self.is_running:
-                for tab in tabs:
-                    if not self.is_running: break
-                    self.driver.switch_to.window(tab)
-                    
-                    # 디버깅: 페이지 소스 저장 (최초 1회)
-                    if not dumped:
-                        try:
-                            with open(r"d:\python\youtube\gemini_debug.html", "w", encoding="utf-8") as f:
-                                f.write(self.driver.page_source)
-                            self.log_signal.emit("🐛 디버깅용 페이지 소스가 저장되었습니다 (gemini_debug.html)")
-                            dumped = True
-                        except Exception as e:
-                            print(f"Dump failed: {e}")
-                    if not self.is_running: break
-                    self.driver.switch_to.window(tab)
-                    
-                    if tab_status[tab] is None and item_idx < total:
-                        current_item = self.items[item_idx]
-                        num, prompt = current_item
-                        self.log_signal.emit(f"▶ [탭 {tabs.index(tab)+1}] {num}번 생성 시작...")
-                        
-                        tab_old_srcs[tab] = self.driver.execute_script("return Array.from(document.querySelectorAll('img')).map(img => img.src);")
-                        
-                        # NanoBanana (Gemini) Input Handling
-                        # Target rich-textarea editor
-                        try:
-                            # 1. Try finding the contenteditable div directly
-                            input_box = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "div.ql-editor, div[contenteditable='true']")))
-                            input_box.click()
-                            time.sleep(0.5)
-                            
-                            # Clear existing text (Ctrl+A -> Delete)
-                            input_box.send_keys(Keys.CONTROL + "a")
-                            input_box.send_keys(Keys.DELETE)
-                            
-                            # Send Prompt
-                            # For rich text editors, sending keys usually works best.
-                            # Splitting lines might help if it's finicky, but standard send_keys usually fine.
-                            input_box.send_keys(prompt.strip())
-                            time.sleep(1)
-                            
-                            # Send Enter
-                            input_box.send_keys(Keys.ENTER)
-                            
-                        except Exception as e:
-                            self.log_signal.emit(f"  ⚠️ 입력창 찾기 실패 (재시도 중): {e}")
-                            # Fallback: JS injection (less reliable for rich text but worth a shot)
-                            try:
-                                js_script = """
-                                var editor = document.querySelector('div.ql-editor');
-                                if(editor) {
-                                    editor.innerText = arguments[0];
-                                    editor.dispatchEvent(new Event('input', { bubbles: true }));
-                                    // Enter trigger might need specific key events
-                                }
-                                """
-                                self.driver.execute_script(js_script, prompt.strip())
-                                time.sleep(1)
-                                input_box.send_keys(Keys.ENTER) 
-                            except:
-                                pass
-
-                        
-                        tab_status[tab] = {"item": current_item, "start_time": time.time()}
-                        item_idx += 1
-                        self.progress.emit(f"진행: {processed_count}/{total}")
-
-                    elif tab_status[tab] is not None:
-                        target_num = tab_status[tab]["item"][0]
-                        img_data = self.check_image_once(self.driver, tab_old_srcs[tab])
-                        
-                        if img_data:
-                            save_path = os.path.join(self.target_dir, f"{target_num}.png")
-                            with open(save_path, "wb") as f:
-                                f.write(base64.b64decode(img_data))
-                            self.log_signal.emit(f"  ✅ [탭 {tabs.index(tab)+1}] {target_num}번 저장 완료")
-                            tab_status[tab] = None
-                            processed_count += 1
-                        
-                        elif time.time() - tab_status[tab]["start_time"] > 220:
-                            self.log_signal.emit(f"  ❌ [탭 {tabs.index(tab)+1}] {target_num}번 타임아웃")
-                            failed_items.append(tab_status[tab]["item"])
-                            tab_status[tab] = None
-                            processed_count += 1
-                
-                time.sleep(1)
-
-            if not self.is_running:
-                 self.log_signal.emit("🛑 작업이 중지되었습니다.")
-                 
-            elapsed_time = time.time() - start_timestamp
-            result_msg = f"완료 (성공 {total - len(failed_items)} / 실패 {len(failed_items)})" if self.is_running else "중지됨"
-            self.finished.emit(result_msg, elapsed_time)
-
-        except Exception as e:
-            self.error.emit(str(e))
-
-    def stop(self):
-        self.is_running = False
-
-    def check_image_once(self, driver, old_srcs):
-        # Initialize failure tracking
-        if not hasattr(self, 'failed_srcs'):
-            self.failed_srcs = set()
-
-        try:
-            images = driver.find_elements(By.TAG_NAME, 'img')
-            
-            exclude = ['icon', 'svg', 'profile', 'avatar', 'btn', 'button', 'logo', 'gstatic.com', 'googleusercontent.com/gadgets']
-
-            # Search in reverse (newest first)
-            for img in reversed(images):
-                try:
-                    src = img.get_attribute('src')
-                    if not src: continue
-                    
-                    if src in old_srcs or src in self.failed_srcs:
-                        continue
-                        
-                    if any(k in src for k in exclude):
-                        continue
-
-                    # Scroll thumbnail into view
-                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", img)
-                    time.sleep(0.5) 
-
-                    # 1. Thumbnail Size Check
-                    size = img.size
-                    w, h = size['width'], size['height']
-                    
-                    if w < 200 or h < 200:
-                        continue
-                        
-                    # aspect ratio check
-                    ratio = w / h if h > 0 else 0
-                    if ratio > 3.0 or ratio < 0.3:
-                        continue
-
-                    # ** Try to open Lightbox (High-Res) **
-                    try:
-                        driver.execute_script("arguments[0].click();", img)
-                        
-                        result_data = None
-                        
-                        # 0. Try "Download Original" Button (Click & Monitor Downloads)
-                        # User Requested: Download via specific button to get original quality
-                        try:
-                            # Wait for button to appear (Short timeout)
-                            dl_wait = WebDriverWait(driver, 5)
-                            dl_btn = dl_wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[aria-label='원본 크기 이미지 다운로드']")))
-                            
-                            # Prepare file monitoring
-                            user_home = os.path.expanduser("~")
-                            download_dir = os.path.join(user_home, "Downloads")
-                            
-                            before_files = set(os.listdir(download_dir))
-                            
-                            # Click
-                            driver.execute_script("arguments[0].click();", dl_btn)
-                            # self.log_signal.emit("  ⬇️ 원본 다운로드 버튼 클릭 완료, 파일 대기 중...")
-                            
-                            # Monitor for new file (30s timeout)
-                            found_file = None
-                            for _ in range(30):
-                                time.sleep(1)
-                                try:
-                                    current_files = set(os.listdir(download_dir))
-                                    new_files = current_files - before_files
-                                    
-                                    valid_candidates = [f for f in new_files if not f.endswith('.crdownload') and not f.endswith('.tmp')]
-                                    if valid_candidates:
-                                        found_file = os.path.join(download_dir, valid_candidates[0])
-                                        
-                                        # Wait for download to finish (size > 0 and stable)
-                                        if os.path.getsize(found_file) > 0:
-                                            time.sleep(1) # Ensure flush
-                                            break
-                                except:
-                                    pass
-                            
-                            if found_file:
-                                with open(found_file, "rb") as f:
-                                    raw_bytes = f.read()
-                                result_data = base64.b64encode(raw_bytes).decode('utf-8')
-                                self.log_signal.emit(f"  📸 원본 버튼으로 다운로드 성공 ({len(raw_bytes)/1024:.1f} KB)")
-                                
-                                # Cleanup
-                                try: os.remove(found_file)
-                                except: pass
-                                
-                        except Exception as e_dl:
-                             # self.log_signal.emit(f"  ⚠️ 다운로드 버튼 스킵/실패: {e_dl}")
-                             pass
-
-                        if not result_data:
-                            best_img = None
-                            max_area = 0
-                            
-                            # Polling for high-res load (up to 10 seconds)
-                            for _ in range(10):
-                                time.sleep(1.0)
-                                
-                                current_imgs = driver.find_elements(By.TAG_NAME, 'img')
-                                best_img_candidate = None
-                                max_area_candidate = 0
-                                
-                                for m_img in current_imgs:
-                                    try:
-                                        mw = int(m_img.get_attribute('naturalWidth') or 0)
-                                        mh = int(m_img.get_attribute('naturalHeight') or 0)
-                                        
-                                        if mw > 600 and (mw * mh > max_area_candidate):
-                                            max_area_candidate = mw * mh
-                                            best_img_candidate = m_img
-                                    except:
-                                        continue
-                                
-                                
-                                if best_img_candidate:
-                                    best_img = best_img_candidate
-                                    max_area = max_area_candidate
-                                    if best_img.is_displayed():
-                                        break
-                                    else:
-                                        best_img = None
-                            
-                            if best_img:
-                                src = best_img.get_attribute('src')
-                                
-                                # 1. Python Requests로 직접 다운로드 (가장 강력함 - 원본 파일 그대로 저장)
-                                if not result_data:
-                                    try:
-                                        session = requests.Session()
-                                        # Selenium 쿠키 복사
-                                        cookies = driver.get_cookies()
-                                        for cookie in cookies:
-                                            session.cookies.set(cookie['name'], cookie['value'])
-                                        
-                                        headers = {
-                                            "User-Agent": driver.execute_script("return navigator.userAgent;")
-                                        }
-                                        
-                                        resp = session.get(src, headers=headers, timeout=15)
-                                        if resp.status_code == 200:
-                                            result_data = base64.b64encode(resp.content).decode('utf-8')
-                                            self.log_signal.emit("  📸 Requests로 원본 다운로드 성공")
-                                    except Exception as e:
-                                        # self.log_signal.emit(f"  ⚠️ Requests 실패: {e}")
-                                        pass
-
-                                # 2. Fetch API (JS) 백업
-                                if not result_data:
-                                    try:
-                                        script = """
-                                        var callback = arguments[arguments.length - 1];
-                                        var img = arguments[0];
-                                        var src = img.src;
-                                        
-                                        fetch(src)
-                                            .then(response => response.blob())
-                                            .then(blob => {
-                                                var reader = new FileReader();
-                                                reader.onloadend = function() {
-                                                    callback(reader.result.split(',')[1]);
-                                                }
-                                                reader.readAsDataURL(blob);
-                                            })
-                                            .catch(err => {
-                                                callback(null);
-                                            });
-                                        """
-                                        result_data = driver.execute_async_script(script, best_img)
-                                        if result_data:
-                                            self.log_signal.emit("  📸 Fetch API로 원본 다운로드 성공")
-                                    except:
-                                        pass
-                                
-                                # 3. 새 탭 열기 백업
-                                if not result_data:
-                                    try:
-                                        current_handle = driver.current_window_handle
-                                        driver.execute_script("window.open(arguments[0], '_blank');", src)
-                                        time.sleep(2.0)
-                                        driver.switch_to.window(driver.window_handles[-1])
-                                        full_img = driver.find_element(By.TAG_NAME, 'img')
-                                        result_data = full_img.screenshot_as_base64
-                                        driver.close()
-                                        driver.switch_to.window(current_handle)
-                                        self.log_signal.emit("  📸 새 탭 열기로 캡처 성공")
-                                    except:
-                                        try:
-                                            if len(driver.window_handles) > 2: driver.close()
-                                            driver.switch_to.window(current_handle)
-                                        except: pass
-                            
-                            # 4. 고해상도 실패 시 썸네일이라도 저장 (Fallback)
-                            if not result_data:
-                                self.log_signal.emit(f"  ⚠️ 고해상도 실패 -> 썸네일 안전 캡처 시도")
-                                # 썸네일이 화면 밖으로 나가지 않게 스타일 강제 조정
-                                try:
-                                    driver.execute_script("""
-                                        arguments[0].style.position = 'fixed';
-                                        arguments[0].style.top = '50%';
-                                        arguments[0].style.left = '50%';
-                                        arguments[0].style.transform = 'translate(-50%, -50%)';
-                                        arguments[0].style.maxWidth = '90vw';
-                                        arguments[0].style.maxHeight = '90vh';
-                                        arguments[0].style.objectFit = 'contain';
-                                        arguments[0].style.zIndex = '99999';
-                                        arguments[0].style.backgroundColor = 'black';
-                                    """, img)
-                                    time.sleep(0.5)
-                                    result_data = img.screenshot_as_base64
-                                except:
-                                    result_data = img.screenshot_as_base64 # 진짜 최후의 수단
-                        
-                        # Close Lightbox (ESC)
-                        try:
-                            driver.find_element(By.TAG_NAME, 'body').send_keys(Keys.ESCAPE)
-                        except:
-                            pass
-                        time.sleep(0.5)
-                        
-                        if result_data:
-                            return result_data
-                        else:
-                            self.failed_srcs.add(src)
-                            
-                    except Exception:
-                        self.failed_srcs.add(src)
-                        pass
-                    
-                except Exception:
-                    continue
-                    
-            return None
-            
-        except Exception:
             return None
 
 
@@ -2244,6 +1855,77 @@ class AudioNormalWorker(QThread):
         except Exception as e:
             self.error.emit(f"치명적 오류: {e}")
 
+class CustomTabWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(0,0,0,0)
+        self.layout.setSpacing(0)
+        
+        # Button Container
+        self.btn_container = QWidget()
+        self.btn_layout = QGridLayout(self.btn_container)
+        self.btn_layout.setContentsMargins(0,0,0,0)
+        self.btn_layout.setSpacing(1)
+        self.layout.addWidget(self.btn_container)
+        
+        # Stack
+        self.stack = QStackedWidget()
+        self.stack.setStyleSheet("border: 1px solid #444; border-top: none;")
+        self.layout.addWidget(self.stack)
+        
+        self.buttons = []
+        
+    def addTab(self, widget, title):
+        self.stack.addWidget(widget)
+        btn = QPushButton(title)
+        btn.setCheckable(True)
+        btn.setFixedHeight(40) # 적당한 높이
+        btn.clicked.connect(lambda: self.setCurrentIndex(self.stack.indexOf(widget)))
+        
+        idx = len(self.buttons)
+        row = idx // 6
+        col = idx % 6
+        
+        self.btn_layout.addWidget(btn, row, col)
+        self.buttons.append(btn)
+        
+        # 처음 탭을 기본 선택
+        if len(self.buttons) == 1:
+            self.setCurrentIndex(0)
+            
+    def setCurrentIndex(self, index):
+        self.stack.setCurrentIndex(index)
+        for i, btn in enumerate(self.buttons):
+            if i == index:
+                btn.setChecked(True)
+                # Selected Style
+                btn.setStyleSheet("""
+                    QPushButton {
+                        background-color: #444444;
+                        color: #ffffff;
+                        border: 1px solid #444;
+                        font-weight: bold;
+                        font-family: 'Malgun Gothic';
+                        font-size: 13px;
+                    }
+                """)
+            else:
+                btn.setChecked(False)
+                # Normal Style
+                btn.setStyleSheet("""
+                    QPushButton {
+                        background-color: #2b2b2b;
+                        color: #b1b1b1;
+                        border: 1px solid #444;
+                        font-family: 'Malgun Gothic';
+                        font-size: 13px;
+                    }
+                    QPushButton:hover {
+                        background-color: #333333;
+                    }
+                """)
+
 class MainApp(QWidget):
     # Signals must be class variables
     log_signal = pyqtSignal(str)
@@ -2254,7 +1936,7 @@ class MainApp(QWidget):
         super().__init__()
         self.driver = None
         self.start_time_gen = 0
-        self.start_time_nano = 0
+
         self.start_time_fx = 0
         self.loaded_items = []
         self.current_file_path = ""
@@ -2268,29 +1950,8 @@ class MainApp(QWidget):
         layout = QVBoxLayout()
 
         # 메인 레이아웃을 탭 위젯으로 변경
-        self.tabs = QTabWidget()
-        self.tabs.setElideMode(Qt.ElideNone) # 텍스트 잘림 방지
-        self.tabs.setUsesScrollButtons(True) # 탭이 많으면 스크롤 버튼 사용
-        self.tabs.tabBar().setExpanding(False) # 탭이 강제로 늘어나지 않고 글자 크기에 맞게 설정
-
-        # 탭 스타일 개선
-        self.tabs.setStyleSheet("""
-            QTabWidget::pane { border: 1px solid #444; top: -1px; }
-            QTabBar::tab {
-                background: #2b2b2b;
-                color: #b1b1b1;
-                border: 1px solid #444;
-                padding: 8px 15px;      /* 좌우 패딩 유지 */
-                font-size: 13px;
-                font-family: 'Malgun Gothic';
-                min-width: 110px;       /* 핵심: 탭의 최소 너비를 지정하여 글자 잘림 방지 */
-            }
-            QTabBar::tab:selected {
-                background: #444444;
-                color: #ffffff;
-                border-bottom-color: #444444;
-            }
-        """)
+        # 메인 레이아웃을 커스텀 탭 위젯으로 변경
+        self.tabs = CustomTabWidget()
         
         layout.addWidget(self.tabs)
 
@@ -2299,10 +1960,6 @@ class MainApp(QWidget):
         self.initTab1()
         self.tabs.addTab(self.tab1, "GenSpark Image")
 
-        # 탭 1-3: NanoBanana Image (Added next to GenSpark)
-        self.tab_nano = QWidget()
-        self.initTabNanoBanana()
-        self.tabs.addTab(self.tab_nano, "NanoBanana Image")
 
         # 탭 1-2: ImageFX Image
         self.tab_fx = QWidget()
@@ -2344,10 +2001,21 @@ class MainApp(QWidget):
         self.initTabFTP()
         self.tabs.addTab(self.tab_ftp, "FTP Upload")
 
+
         # 탭 8: YouTube Analysis
         self.tab7 = QWidget()
         self.initTab7()
         self.tabs.addTab(self.tab7, "YouTube 분석")
+        
+        # 탭 9: Audio Transcribe
+        self.tab_transcribe = QWidget()
+        self.initTabAudioTranscribe()
+        self.tabs.addTab(self.tab_transcribe, "Audio Transcribe")
+        
+        # 탭 10: Audio To Video
+        self.tab_audio_video = QWidget()
+        self.initTabAudioToVideo()
+        self.tabs.addTab(self.tab_audio_video, "Audio To Video")
 
 
         self.setLayout(layout)
@@ -2422,75 +2090,6 @@ class MainApp(QWidget):
 
         self.tab1.setLayout(layout)
 
-    def initTabNanoBanana(self):
-        layout = QVBoxLayout()
-
-        self.nano_status_label = QLabel("1단계: NanoBanana 브라우저를 먼저 준비해 주세요.")
-        self.nano_status_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #D4D4D4;")
-        layout.addWidget(self.nano_status_label)
-
-        self.nano_timer_label = QLabel("소요 시간: 00:00:00")
-        layout.addWidget(self.nano_timer_label)
-
-        # 저장 경로 설정
-        path_layout = QHBoxLayout()
-        self.nano_image_path_edit = QLineEdit(r"D:\youtube")
-        self.nano_image_path_edit.setStyleSheet("background-color: #2D2D2D; color: #D4D4D4; height: 25px;")
-        btn_browse_image = QPushButton("찾아보기")
-        btn_browse_image.clicked.connect(lambda: self.browse_image_path_custom(self.nano_image_path_edit))
-        path_layout.addWidget(QLabel("저장 폴더:"))
-        path_layout.addWidget(self.nano_image_path_edit)
-        path_layout.addWidget(btn_browse_image)
-        layout.addLayout(path_layout)
-
-        # 버튼들
-        self.btn_nano_prepare = QPushButton("🌐 1. NanoBanana 브라우저 및 탭 준비")
-        self.btn_nano_prepare.setStyleSheet("height: 50px; font-weight: bold; background-color: #673AB7; color: white; border-radius: 8px;")
-        self.btn_nano_prepare.clicked.connect(self.launch_browser_nanobanana)
-        layout.addWidget(self.btn_nano_prepare)
-
-        # 텍스트 입력창 추가
-        layout.addWidget(QLabel("이미지 프롬프트 입력:"))
-        self.nano_prompt_input = QTextEdit()
-        self.nano_prompt_input.setPlaceholderText("프롬프트 내용을 입력하세요.\n1. 프롬프트1\n2. 프롬프트2")
-        self.nano_prompt_input.setStyleSheet("background-color: #1E1E1E; color: #D4D4D4;")
-        layout.addWidget(self.nano_prompt_input)
-
-        btn_h_layout = QHBoxLayout()
-        self.btn_nano_start = QPushButton("🚀 2. NanoBanana 이미지 생성 시작")
-        self.btn_nano_start.setEnabled(True)
-        self.btn_nano_start.setStyleSheet("""
-            QPushButton { height: 50px; font-weight: bold; background-color: #28a745; color: white; border-radius: 8px; }
-            QPushButton:disabled { background-color: #6c757d; }
-        """)
-        self.btn_nano_start.clicked.connect(self.start_automation_nanobanana)
-        
-        self.btn_nano_stop = QPushButton("🛑 중지")
-        self.btn_nano_stop.setEnabled(False)
-        self.btn_nano_stop.setStyleSheet("""
-            QPushButton { height: 50px; font-weight: bold; background-color: #dc3545; color: white; border-radius: 8px; }
-            QPushButton:disabled { background-color: #6c757d; }
-        """)
-        self.btn_nano_stop.clicked.connect(self.stop_automation_nanobanana)
-
-        btn_h_layout.addWidget(self.btn_nano_start)
-        btn_h_layout.addWidget(self.btn_nano_stop)
-        layout.addLayout(btn_h_layout)
-
-        # 압축 버튼 추가
-        self.btn_nano_compress = QPushButton("🗜️ 3. 이미지 압축 (용량 줄이기)")
-        self.btn_nano_compress.setStyleSheet("height: 50px; font-weight: bold; background-color: #FF9800; color: white; border-radius: 8px; margin-top: 5px;")
-        self.btn_nano_compress.clicked.connect(lambda: self.compress_images_custom(self.nano_image_path_edit, self.nano_log_display))
-        layout.addWidget(self.btn_nano_compress)
-
-        # 로그 디스플레이
-        self.nano_log_display = QTextEdit()
-        self.nano_log_display.setReadOnly(True)
-        self.nano_log_display.setStyleSheet("background-color: #1E1E1E; color: #D4D4D4; font-family: 'Consolas', 'Malgun Gothic';")
-        self.nano_log_display.setMaximumHeight(150)
-        layout.addWidget(self.nano_log_display)
-
-        self.tab_nano.setLayout(layout)
 
     def initTabImageFX(self):
         layout = QVBoxLayout()
@@ -3658,35 +3257,6 @@ class MainApp(QWidget):
             self.log_display.append(f"❌ 브라우저 실행 오류: {e}")
             self.status_label.setText("오류 발생 (로그 확인)")
 
-    def launch_browser_nanobanana(self):
-        try:
-            self.nano_log_display.append("🌐 NanoBanana 브라우저를 실행합니다...")
-            chrome_cmd = r'C:\Program Files\Google\Chrome\Application\chrome.exe'
-            user_data = r'C:\sel_chrome_nano'
-            target_url = "https://gemini.google.com/app?hl=ko" 
-            
-            if not os.path.exists(user_data):
-                os.makedirs(user_data)
-                
-            subprocess.Popen([chrome_cmd, '--remote-debugging-port=9224', f'--user-data-dir={user_data}', target_url])
-            
-            # Wait for browser to open
-            time.sleep(3)
-            
-            opt = Options()
-            opt.add_experimental_option("debuggerAddress", "127.0.0.1:9224")
-            self.driver_nano = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opt)
-            
-            # Ensure 2 tabs
-            if len(self.driver_nano.window_handles) < 2:
-                self.driver_nano.execute_script(f"window.open('{target_url}');")
-                
-            self.nano_log_display.append("✅ NanoBanana 브라우저 연결 성공. 두 개의 탭을 확인하세요.")
-            self.nano_status_label.setText("2단계: 프롬프트 입력 후 시작 버튼을 누르세요.")
-            
-        except Exception as e:
-            self.nano_log_display.append(f"❌ 브라우저 실행 오류: {e}")
-            self.nano_status_label.setText("오류 발생 (로그 확인)")
 
     def launch_browser_imagefx(self):
         try:
@@ -3822,12 +3392,6 @@ class MainApp(QWidget):
             if hasattr(self, 'fx_timer_label'):
                 self.fx_timer_label.setText(f"소요 시간: {h:02d}:{m:02d}:{s:02d}")
 
-        # NanoBanana Timer
-        if hasattr(self, 'start_time_nano') and self.start_time_nano > 0:
-            elapsed = int(now - self.start_time_nano)
-            h, m, s = elapsed // 3600, (elapsed % 3600) // 60, elapsed % 60
-            if hasattr(self, 'nano_timer_label'):
-                self.nano_timer_label.setText(f"소요 시간: {h:02d}:{m:02d}:{s:02d}")
 
     def start_automation(self):
         if not self.driver:
@@ -3890,75 +3454,6 @@ class MainApp(QWidget):
             self.log_display.append("🛑 중지 요청 중... (현재 작업 완료 후 중단됩니다)")
             self.btn_stop.setEnabled(False)
 
-    def start_automation_nanobanana(self):
-        if not hasattr(self, 'driver_nano') or not self.driver_nano:
-            self.nano_log_display.append("❌ 브라우저가 준비되지 않았습니다.")
-            return
-        
-        text = self.nano_prompt_input.toPlainText().strip()
-        if not text:
-            self.nano_log_display.append("❌ 입력된 프롬프트가 없습니다.")
-            return
-
-        # 프롬프트 파싱: (\d+)\s*\.\s*\{(.*?)\}
-        loaded_items = re.findall(r'(\d+)\s*\.\s*\{(.*?)\}', text, re.DOTALL)
-        
-        if not loaded_items:
-            # Fallback for old format
-            loaded_items = []
-            for line in text.split('\n'):
-                match = re.match(r'^(\d+(?:-\d+)?)\.?\s*(.*)', line.strip())
-                if match:
-                    loaded_items.append((match.group(1), match.group(2)))
-
-        if not loaded_items:
-            self.nano_log_display.append("❌ 프롬프트 형식이 올바르지 않습니다 (예: 1. {프롬프트})")
-            return
-
-        self.btn_nano_start.setEnabled(False)
-        self.btn_nano_stop.setEnabled(True)
-        self.start_time_nano = time.time()
-        if not self.ui_timer.isActive():
-            self.ui_timer.start(1000) 
-        
-        file_path = "nano_" + time.strftime("%H%M%S")
-        image_target = self.nano_image_path_edit.text().strip()
-        
-        self.worker_nano = NanoBananaMultiTabWorker(file_path, loaded_items, self.driver_nano, custom_target_dir=image_target)
-        self.worker_nano.progress.connect(self.nano_status_label.setText)
-        self.worker_nano.log_signal.connect(lambda m: self.nano_log_display.append(m))
-        self.worker_nano.finished.connect(self.on_success_nano)
-        self.worker_nano.error.connect(self.on_error_nano)
-        self.worker_nano.start()
-
-    def on_success_nano(self, msg, elapsed):
-        self.start_time_nano = 0
-        if self.start_time_gen == 0 and self.start_time_fx == 0:
-            self.ui_timer.stop()
-            
-        self.btn_nano_start.setEnabled(True)
-        self.btn_nano_stop.setEnabled(False)
-        self.nano_log_display.append(f"🏁 {msg}")
-        
-        # 생성 완료 후 자동 압축 실행
-        if hasattr(self, 'worker_nano') and self.worker_nano.target_dir:
-            self.nano_log_display.append("🔄 생성 완료: 자동 압축(JPG 변환)을 시작합니다...")
-            self.compress_images(dir_path=self.worker_nano.target_dir)
-
-    def on_error_nano(self, err):
-        self.start_time_nano = 0
-        if self.start_time_gen == 0 and self.start_time_fx == 0:
-            self.ui_timer.stop()
-            
-        self.btn_nano_start.setEnabled(True)
-        self.btn_nano_stop.setEnabled(False)
-        self.nano_log_display.append(f"❗ 오류: {err}")
-
-    def stop_automation_nanobanana(self):
-        if hasattr(self, 'worker_nano') and self.worker_nano.isRunning():
-            self.worker_nano.stop()
-            self.nano_log_display.append("🛑 중지 요청 중... (현재 작업 완료 후 중단됩니다)")
-            self.btn_nano_stop.setEnabled(False)
 
     def compress_images(self, dir_path=None):
         if not dir_path:
@@ -4521,9 +4016,241 @@ class MainApp(QWidget):
             input_dir, output_dir, style, volume, trim_end, effect_config
         )
         self.batch_eff_worker.log_signal.connect(self.single_log.append)
-        self.batch_eff_worker.finished.connect(lambda m, t: [self.single_log.append(f"🏁 {m}"), self.btn_start_single.setEnabled(True)])
         self.batch_eff_worker.error.connect(lambda e: [self.single_log.append(f"❌ {e}"), self.btn_start_single.setEnabled(True)])
         self.batch_eff_worker.start()
+
+    def initTabAudioToVideo(self):
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel("🎬 MP3 + SRT + 이미지를 결합하여 영상을 제작합니다."))
+        layout.addWidget(QLabel("   - 폴더 내의 1.mp3, 1.srt 파일을 찾아 1.mp4를 만듭니다."))
+        layout.addWidget(QLabel("   - SRT 인덱스에 맞는 이미지(1.jpg, 2.jpg...)가 있으면 해당 시점에 배경으로 사용합니다."))
+        layout.addWidget(QLabel("   - 자막 스타일은 'Video Composite' 탭의 설정을 따릅니다."))
+        
+        # Folder Selection
+        dir_layout = QHBoxLayout()
+        self.atv_dir = QLineEdit()
+        btn_dir = QPushButton("작업 폴더 선택")
+        btn_dir.clicked.connect(lambda: self.browse_folder(self.atv_dir))
+        dir_layout.addWidget(QLabel("작업 폴더:"))
+        dir_layout.addWidget(self.atv_dir)
+        dir_layout.addWidget(btn_dir)
+        layout.addLayout(dir_layout)
+        
+        # Start Button
+        self.btn_atv_start = QPushButton("영상 생성 시작")
+        self.btn_atv_start.setStyleSheet("height: 40px; font-weight: bold; background-color: #673AB7; color: white;")
+        self.btn_atv_start.clicked.connect(self.start_audio_to_video)
+        layout.addWidget(self.btn_atv_start)
+        
+        # Log
+        self.atv_log = QTextEdit()
+        self.atv_log.setReadOnly(True)
+        self.atv_log.setStyleSheet("background-color: #1E1E1E; color: #D4D4D4;")
+        layout.addWidget(self.atv_log)
+        
+        self.tab_audio_video.setLayout(layout)
+
+    def start_audio_to_video(self):
+        target_dir = self.atv_dir.text().strip()
+        if not target_dir or not os.path.exists(target_dir):
+            QMessageBox.warning(self, "경고", "올바른 작업 폴더를 선택해주세요.")
+            return
+
+        # 스타일 설정 읽기 (tab3의 컨트롤 재사용)
+        style = {
+            'font_family': self.combo_font.currentText(),
+            'font_size': self.spin_font_size.value(),
+            'text_color': self.color_text,
+            'outline_color': self.color_outline,
+            'bg_color': self.color_bg,
+            'bg_opacity': int(self.slider_bg_opacity.value() * 2.55), # 0-100 -> 0-255
+            'use_bg': self.checkbox_use_bg.isChecked(),
+            'use_outline': self.checkbox_use_outline.isChecked(),
+            'font_folder': self.font_folder_path.text().strip()
+        }
+        
+        self.atv_log.append(f"🚀 작업 시작: {target_dir}")
+        self.btn_atv_start.setEnabled(False)
+        
+        self.atv_worker = AudioToVideoWorker(target_dir, style)
+        self.atv_worker.log_signal.connect(self.atv_log.append)
+        self.atv_worker.finished.connect(self.on_atv_finished)
+        self.atv_worker.error.connect(self.on_atv_error)
+        self.atv_worker.start()
+        
+    def on_atv_finished(self, msg):
+        self.atv_log.append(f"🏁 {msg}")
+        self.btn_atv_start.setEnabled(True)
+        
+    def on_atv_error(self, err):
+        self.atv_log.append(f"❌ 오류: {err}")
+        self.btn_atv_start.setEnabled(True)
+
+    def initTabAudioTranscribe(self):
+        layout = QVBoxLayout()
+        
+        layout.addWidget(QLabel("🎙️ 오디오 변환 및 자막 생성 (Whisper)"))
+        layout.addWidget(QLabel("   (OpenAI Whisper 모델을 사용하여 MP3를 SRT 자막으로 변환합니다.)"))
+
+        # Model Selection
+        model_group = QGroupBox("Whisper 모델 설정")
+        model_layout = QHBoxLayout()
+        
+        self.combo_whisper_model = QComboBox()
+        # Models: tiny, base, small, medium, large
+        self.combo_whisper_model.addItems(["base", "tiny", "small", "medium", "large"])
+        self.combo_whisper_model.setCurrentText("base")
+        
+        model_layout.addWidget(QLabel("모델 크기:"))
+        model_layout.addWidget(self.combo_whisper_model)
+        model_layout.addWidget(QLabel("(클수록 정확하지만 느림, GPU 권장)"))
+        
+        model_group.setLayout(model_layout)
+        layout.addWidget(model_group)
+
+        # 3 Tabs for sub-functions
+        sub_tabs = QTabWidget()
+        
+        # SubTab 1: M4A -> MP3
+        tab_conv = QWidget()
+        l_conv = QVBoxLayout()
+        
+        conv_in_group = QGroupBox("M4A 파일 선택")
+        conv_in_layout = QHBoxLayout()
+        self.at_m4a_files = QLineEdit()
+        self.at_m4a_files.setPlaceholderText("선택된 파일이 없습니다.")
+        btn_m4a = QPushButton("파일 찾기")
+        btn_m4a.clicked.connect(lambda: self.browse_files(self.at_m4a_files, "Audio Files (*.m4a)"))
+        conv_in_layout.addWidget(self.at_m4a_files)
+        conv_in_layout.addWidget(btn_m4a)
+        conv_in_group.setLayout(conv_in_layout)
+        
+        l_conv.addWidget(conv_in_group)
+        
+        self.btn_at_convert = QPushButton("1. M4A -> MP3 변환 시작 (선택 파일)")
+        self.btn_at_convert.setStyleSheet("background-color: #009688; color: white; padding: 10px; font-weight: bold;")
+        self.btn_at_convert.clicked.connect(lambda: self.start_audio_transcribe("convert"))
+        l_conv.addWidget(self.btn_at_convert)
+        l_conv.addStretch()
+        
+        tab_conv.setLayout(l_conv)
+        sub_tabs.addTab(tab_conv, "1. Convert MP3")
+        
+        # SubTab 2: MP3 -> SRT
+        tab_srt = QWidget()
+        l_srt = QVBoxLayout()
+        
+        srt_in_group = QGroupBox("MP3 파일 선택")
+        srt_in_layout = QHBoxLayout()
+        self.at_mp3_files = QLineEdit()
+        self.at_mp3_files.setPlaceholderText("선택된 파일이 없습니다.")
+        btn_mp3 = QPushButton("파일 찾기")
+        btn_mp3.clicked.connect(lambda: self.browse_files(self.at_mp3_files, "Audio Files (*.mp3)"))
+        srt_in_layout.addWidget(self.at_mp3_files)
+        srt_in_layout.addWidget(btn_mp3)
+        srt_in_group.setLayout(srt_in_layout)
+        
+        l_srt.addWidget(srt_in_group)
+        
+        self.btn_at_transcribe = QPushButton("2. MP3 -> SRT 자막 생성 시작 (선택 파일)")
+        self.btn_at_transcribe.setStyleSheet("background-color: #673AB7; color: white; padding: 10px; font-weight: bold;")
+        self.btn_at_transcribe.clicked.connect(lambda: self.start_audio_transcribe("transcribe"))
+        l_srt.addWidget(self.btn_at_transcribe)
+        l_srt.addStretch()
+        
+        tab_srt.setLayout(l_srt)
+        sub_tabs.addTab(tab_srt, "2. Make SRT")
+        
+        # SubTab 3: All-in-One
+        tab_all = QWidget()
+        l_all = QVBoxLayout()
+        
+        all_in_group = QGroupBox("M4A 파일 선택 (원본)")
+        all_in_layout = QHBoxLayout()
+        self.at_all_files = QLineEdit()
+        self.at_all_files.setPlaceholderText("선택된 파일이 없습니다.")
+        btn_all = QPushButton("파일 찾기")
+        btn_all.clicked.connect(lambda: self.browse_files(self.at_all_files, "Audio Files (*.m4a)"))
+        all_in_layout.addWidget(self.at_all_files)
+        all_in_layout.addWidget(btn_all)
+        all_in_group.setLayout(all_in_layout)
+        
+        l_all.addWidget(all_in_group)
+        
+        l_all.addWidget(QLabel("ℹ️ 선택한 M4A를 MP3로 변환하고 즉시 SRT를 생성합니다."))
+        self.btn_at_all = QPushButton("3. M4A -> MP3 -> SRT 일괄 실행 (선택 파일)")
+        self.btn_at_all.setStyleSheet("background-color: #E91E63; color: white; padding: 10px; font-weight: bold;")
+        self.btn_at_all.clicked.connect(lambda: self.start_audio_transcribe("all"))
+        l_all.addWidget(self.btn_at_all)
+        l_all.addStretch()
+        
+        tab_all.setLayout(l_all)
+        sub_tabs.addTab(tab_all, "3. All-in-One")
+        
+        layout.addWidget(sub_tabs)
+        
+        # Log
+        self.at_log = QTextEdit()
+        self.at_log.setReadOnly(True)
+        self.at_log.setStyleSheet("background-color: #1E1E1E; color: #D4D4D4;")
+        layout.addWidget(self.at_log)
+        
+        self.tab_transcribe.setLayout(layout)
+
+    def browse_files(self, line_edit, filter_str):
+        files, _ = QFileDialog.getOpenFileNames(self, "파일 선택", "", filter_str)
+        if files:
+            line_edit.setText("; ".join(files))
+
+    def start_audio_transcribe(self, mode):
+        # mode: 'convert', 'transcribe', 'all'
+        target_files = []
+        raw_text = ""
+        
+        if mode == "convert":
+            raw_text = self.at_m4a_files.text().strip()
+        elif mode == "transcribe":
+            raw_text = self.at_mp3_files.text().strip()
+        elif mode == "all":
+            raw_text = self.at_all_files.text().strip()
+            
+        if not raw_text:
+            QMessageBox.warning(self, "경고", "선택된 파일이 없습니다.")
+            return
+
+        target_files = [f.strip() for f in raw_text.split(";") if f.strip()]
+        
+        if not target_files:
+            QMessageBox.warning(self, "경고", "파일 목록이 유효하지 않습니다.")
+            return
+
+        model_name = self.combo_whisper_model.currentText()
+        
+        self.at_log.append(f"🚀 작업 시작: {mode} (Model: {model_name})")
+        self.at_log.append(f"📂 대상: {len(target_files)}개 파일")
+        
+        # Disable buttons
+        self.btn_at_convert.setEnabled(False)
+        self.btn_at_transcribe.setEnabled(False)
+        self.btn_at_all.setEnabled(False)
+        
+        self.at_worker = AudioTranscriberWorker(target_files, mode, model_name)
+        self.at_worker.log_signal.connect(self.at_log.append)
+        self.at_worker.finished.connect(self.on_at_finished)
+        self.at_worker.error.connect(self.on_at_error)
+        self.at_worker.start()
+        
+    def on_at_finished(self, msg):
+        self.at_log.append(f"🏁 {msg}")
+        self.btn_at_convert.setEnabled(True)
+        self.btn_at_transcribe.setEnabled(True)
+        self.btn_at_all.setEnabled(True)
+        
+    def on_at_error(self, err):
+        self.at_log.append(f"❌ 오류: {err}")
+        self.btn_at_convert.setEnabled(True)
+        self.btn_at_transcribe.setEnabled(True)
+        self.btn_at_all.setEnabled(True)
 
 class BatchVideoEffectWorker(VideoMergerWorker):
     def __init__(self, input_dir, output_dir, style=None, volume=1.0, trim_end=0.0, effect_config=None):
@@ -4877,6 +4604,621 @@ class FTPLoginWorker(QThread):
             if ftp:
                 try: ftp.quit()
                 except: pass
+
+
+class AudioTranscriberWorker(QThread):
+    log_signal = pyqtSignal(str)
+    finished = pyqtSignal(str)
+    error = pyqtSignal(str)
+
+    def __init__(self, target_files, mode, model_name):
+        super().__init__()
+        self.target_files = target_files # List of absolute file paths
+        self.mode = mode # 'convert', 'transcribe', 'all'
+        self.model_name = model_name
+
+    def run(self):
+        try:
+            # 1. FFmpeg Check (Common)
+            # 1. FFmpeg Check & Setup for Whisper
+            try:
+                import imageio_ffmpeg
+                import shutil
+                
+                ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+                # ImageIO provides 'ffmpeg-win-x86_64-vX.X.exe', but Whisper calls 'ffmpeg'
+                # So we must create a copy named 'ffmpeg.exe' in a folder and add to PATH
+                
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+                bin_dir = os.path.join(base_dir, "ffmpeg_bin")
+                os.makedirs(bin_dir, exist_ok=True)
+                
+                target_fft_exe = os.path.join(bin_dir, "ffmpeg.exe")
+                
+                if not os.path.exists(target_fft_exe):
+                    self.log_signal.emit(f"   ℹ️ FFmpeg 복사 중... ({ffmpeg_exe} -> {target_fft_exe})")
+                    shutil.copy2(ffmpeg_exe, target_fft_exe)
+                    
+                # Add bin_dir to PATH
+                if bin_dir not in os.environ["PATH"]:
+                    self.log_signal.emit(f"   ℹ️ PATH 추가: {bin_dir}")
+                    os.environ["PATH"] = bin_dir + os.pathsep + os.environ["PATH"]
+                    
+            except ImportError:
+                ffmpeg_exe = "ffmpeg"
+                self.log_signal.emit("   ⚠️ imageio_ffmpeg 모듈 없음. 시스템 FFmpeg 사용.")
+
+            # 2. Whisper Load (if needed)
+            whisper_model = None
+            if self.mode in ["transcribe", "all"]:
+                try:
+                    import whisper
+                    try:
+                        import torch
+                        device = "cuda" if torch.cuda.is_available() else "cpu"
+                        self.log_signal.emit(f"   ℹ️ Whisper 로드 중 ({self.model_name}, Device: {device})...")
+                    except:
+                        device = "cpu"
+                        
+                    whisper_model = whisper.load_model(self.model_name, device=device)
+                    self.log_signal.emit("   ✅ Whisper 모델 로드 완료")
+                except ImportError:
+                    self.error.emit("openai-whisper 모듈이 설치되지 않았습니다. (pip install openai-whisper)")
+                    return
+                except Exception as e:
+                    self.error.emit(f"Whisper 로드 실패: {e}")
+                    return
+
+            self.target_files.sort()
+            
+            # --- M4A -> MP3 ---
+            if self.mode in ["convert", "all"]:
+                # Filter M4A from the selected list
+                m4a_files = [f for f in self.target_files if f.lower().endswith('.m4a')]
+
+                if not m4a_files:
+                    self.log_signal.emit("⚠️ 선택된 파일 중 M4A 파일이 없습니다.")
+                else:
+                    self.log_signal.emit(f"🔄 M4A -> MP3 변환 시작 (총 {len(m4a_files)}개)")
+                    creation_flags = 0x08000000 if os.name == 'nt' else 0
+                    
+                    for in_path in m4a_files:
+                        in_dir = os.path.dirname(in_path)
+                        base = os.path.splitext(os.path.basename(in_path))[0]
+                        out_path = os.path.join(in_dir, base + ".mp3")
+                        f_name = os.path.basename(in_path)
+                        
+                        if os.path.exists(out_path):
+                            self.log_signal.emit(f"   ⏩ 이미 존재함: {base}.mp3")
+                            continue
+                            
+                        self.log_signal.emit(f"   converting: {f_name} ...")
+                        cmd = [
+                            ffmpeg_exe, "-y", "-i", in_path,
+                            "-c:a", "libmp3lame", "-b:a", "64k",
+                            out_path
+                        ]
+                        try:
+                            subprocess.run(
+                                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                check=True, creationflags=creation_flags
+                            )
+                        except Exception as e:
+                            self.log_signal.emit(f"   ❌ 변환 실패 ({f_name}): {e}")
+
+            # --- MP3 -> SRT ---
+            if self.mode in ["transcribe", "all"]:
+                mp3_files = []
+                
+                if self.mode == "all":
+                    # In 'all' mode, we infer mp3 paths from the input m4a files
+                    m4a_files = [f for f in self.target_files if f.lower().endswith('.m4a')]
+                    for m4a in m4a_files:
+                        base = os.path.splitext(m4a)[0]
+                        mp3_files.append(base + ".mp3")
+                else:
+                     # In 'transcribe' mode, use the selected mp3 files
+                     mp3_files = [f for f in self.target_files if f.lower().endswith('.mp3')]
+                
+                # Filter out non-existent mp3s (e.g. if conversion failed)
+                mp3_files = [f for f in mp3_files if os.path.exists(f)]
+
+                if not mp3_files:
+                    self.log_signal.emit("⚠️ MP3 파일이 없습니다 (변환이 실패했거나 선택되지 않음).")
+                else:
+                    self.log_signal.emit(f"📝 MP3 -> SRT 작업 시작 (총 {len(mp3_files)}개)")
+                    for in_path in mp3_files:
+                        in_dir = os.path.dirname(in_path)
+                        f_name = os.path.basename(in_path)
+                        base = os.path.splitext(f_name)[0]
+                        srt_path = os.path.join(in_dir, base + ".srt")
+                        
+                        if os.path.exists(srt_path):
+                            self.log_signal.emit(f"   ⏩ 이미 존재함: {base}.srt")
+                            continue
+                            
+                        self.log_signal.emit(f"   Transcribing: {f_name} ...")
+                        try:
+                            # Transcribe
+                            result = whisper_model.transcribe(in_path)
+                            
+                            # Write SRT
+                            # Write SRT
+                            with open(srt_path, "w", encoding="utf-8") as srt_file:
+                                srt_index = 1
+                                for segment in result["segments"]:
+                                    original_text = segment["text"].strip()
+                                    start_time = segment["start"]
+                                    end_time = segment["end"]
+                                    
+                                    # 20자 제한 체크 및 분할
+                                    if len(original_text) > 20:
+                                        # 간단한 공백 기준 분리 후 재조합 방식
+                                        words = original_text.split()
+                                        chunks = []
+                                        current_chunk = []
+                                        current_len = 0
+                                        
+                                        for word in words:
+                                            if current_len + len(word) + (1 if current_chunk else 0) > 20:
+                                                if current_chunk:
+                                                    chunks.append(" ".join(current_chunk))
+                                                    current_chunk = [word]
+                                                    current_len = len(word)
+                                                else:
+                                                    # 단어 하나가 20자 넘는 경우 (거의 없겠지만)
+                                                    chunks.append(word)
+                                                    current_chunk = []
+                                                    current_len = 0
+                                            else:
+                                                current_chunk.append(word)
+                                                current_len += len(word) + (1 if current_chunk else 0)
+                                        
+                                        if current_chunk:
+                                            chunks.append(" ".join(current_chunk))
+                                        
+                                        # 시간 배분 (글자 수 비율로)
+                                        total_duration = end_time - start_time
+                                        total_chars = len(original_text.replace(" ", "")) # 공백 제외 글자수 기준이 더 정확할 수 있음
+                                        if total_chars == 0: total_chars = 1
+                                        
+                                        current_start = start_time
+                                        
+                                        for i, chunk in enumerate(chunks):
+                                            chunk_len = len(chunk.replace(" ", ""))
+                                            if chunk_len == 0: chunk_len = 1
+                                            
+                                            # 비례 시간 계산
+                                            duration = total_duration * (chunk_len / total_chars)
+                                            
+                                            # 마지막 청크는 끝 시간 고정 (오차 보정)
+                                            if i == len(chunks) - 1:
+                                                chunk_end = end_time
+                                            else:
+                                                chunk_end = current_start + duration
+                                            
+                                            # SRT 쓰기
+                                            srt_file.write(f"{srt_index}\n")
+                                            srt_file.write(f"{self.format_timestamp(current_start)} --> {self.format_timestamp(chunk_end)}\n")
+                                            srt_file.write(f"{chunk}\n\n")
+                                            
+                                            srt_index += 1
+                                            current_start = chunk_end
+                                            
+                                    else:
+                                        # 20자 이하: 그대로 출력
+                                        srt_file.write(f"{srt_index}\n")
+                                        srt_file.write(f"{self.format_timestamp(start_time)} --> {self.format_timestamp(end_time)}\n")
+                                        srt_file.write(f"{original_text}\n\n")
+                                        srt_index += 1
+                                    
+                            self.log_signal.emit(f"   ✅ 완료: {base}.srt")
+                            
+                        except Exception as e:
+                            self.log_signal.emit(f"   ❌ 실패 ({f_name}): {e}")
+
+            self.finished.emit("모든 작업이 완료되었습니다.")
+
+        except Exception as e:
+            self.error.emit(f"치명적 오류: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def format_timestamp(self, seconds):
+        # Convert seconds to HH:MM:SS,mmm
+        millis = int((seconds - int(seconds)) * 1000)
+        seconds = int(seconds)
+        minutes = seconds // 60
+        hours = minutes // 60
+        minutes = minutes % 60
+        seconds = seconds % 60
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
+
+
+class AudioToVideoWorker(QThread):
+    log_signal = pyqtSignal(str)
+    finished = pyqtSignal(str)
+    error = pyqtSignal(str)
+    
+    def __init__(self, target_dir, style):
+        super().__init__()
+        self.target_dir = target_dir
+        self.style = style # Dictionary of style settings
+        self.temp_sub_dir = os.path.join(self.target_dir, "temp_subs")
+
+    def run(self):
+        import shutil
+        try:
+            # Create Temp Dir
+
+            # 1. FFmpeg setup
+            try:
+                import imageio_ffmpeg
+                ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+            except ImportError:
+                ffmpeg_exe = "ffmpeg"
+                
+            files = os.listdir(self.target_dir)
+            mp3_files = [f for f in files if f.lower().endswith('.mp3')]
+            
+            if not mp3_files:
+                self.log_signal.emit("⚠️ MP3 파일이 없습니다.")
+                self.finished.emit("작업 없음")
+                return
+
+            total = len(mp3_files)
+            count = 0
+            
+            # Temp Folder for ASS or Lists
+            # Ensure it exists
+            if not os.path.exists(self.temp_sub_dir):
+                os.makedirs(self.temp_sub_dir)
+
+            for mp3 in mp3_files:
+                base_name = os.path.splitext(mp3)[0]
+                srt_file = base_name + ".srt"
+                srt_path = os.path.join(self.target_dir, srt_file)
+                mp3_path = os.path.join(self.target_dir, mp3)
+                out_path = os.path.join(self.target_dir, base_name + ".mp4")
+                
+                if not os.path.exists(srt_path):
+                    self.log_signal.emit(f"⚠️ SRT 없음 건너뜀: {srt_file}")
+                    continue
+                
+                self.log_signal.emit(f"🎬 생성 중 (High Speed): {base_name}.mp4 ...")
+                
+                # 1. Get Duration
+                # We need audio duration to fill images until end.
+                # Let's use ffprobe.
+                duration = self.get_audio_duration(ffmpeg_exe, mp3_path)
+                if duration == 0:
+                    self.log_signal.emit(f"   ⚠️ 오디오 길이 확인 불가: {mp3}")
+                    continue
+
+                # 2. Parse SRT for Image Plan
+                segments = self.parse_srt(srt_path)
+                
+                # 3. Create Concat List needed for FFMPEG
+                concat_list_path = os.path.join(self.temp_sub_dir, f"inputs_{base_name}.txt")
+                
+                # Logic: Find images
+                checkpoints = []
+                for seg in segments:
+                    idx = seg['index']
+                    t = seg['start']
+                    img_name = f"{idx}.jpg"
+                    if not os.path.exists(os.path.join(self.target_dir, img_name)):
+                         if os.path.exists(os.path.join(self.target_dir, f"{idx}.png")):
+                             img_name = f"{idx}.png"
+                         elif os.path.exists(os.path.join(self.target_dir, f"{idx}.webp")):
+                             img_name = f"{idx}.webp"
+                    
+                    full_img_path = os.path.join(self.target_dir, img_name)
+                    if os.path.exists(full_img_path):
+                        checkpoints.append((t, full_img_path))
+                
+                checkpoints.sort(key=lambda x: x[0])
+                
+                # Write Concat File
+                # Format:
+                # file 'path'
+                # duration 5.0
+                if not checkpoints:
+                    # Black or default?
+                    # Create a dummy black image?
+                    # Or just fail? Let's assume user wants at least one image.
+                    # Create black image using PIL and save
+                    dummy_img = os.path.join(self.temp_sub_dir, "black.jpg")
+                    if not os.path.exists(dummy_img):
+                        from PIL import Image
+                        Image.new('RGB', (1920, 1080), (0,0,0)).save(dummy_img)
+                    checkpoints = [(0.0, dummy_img)]
+
+                with open(concat_list_path, "w", encoding='utf-8') as f:
+                    last_time = 0.0
+                    last_img = checkpoints[0][1] # Default start
+                    
+                    # If first checkpoint is > 0, we need a start image (black or first)
+                    if checkpoints[0][0] > 0:
+                         # Use black or last known? 
+                         # User requested specific track matching. 0~start is gap.
+                         # Use black for gap?
+                         # Creating black.jpg
+                         black_img = os.path.join(self.temp_sub_dir, "black.jpg")
+                         if not os.path.exists(black_img):
+                            from PIL import Image
+                            Image.new('RGB', (1920, 1080), (0,0,0)).save(black_img)
+                         
+                         f.write(f"file '{black_img}'\n")
+                         f.write(f"duration {checkpoints[0][0]}\n")
+                         last_time = checkpoints[0][0]
+
+                    for i, (t, img_path) in enumerate(checkpoints):
+                        # Duration of PREVIOUS clip is (t - last_at_time) ??
+                        # No, concat format:
+                        # file 'A'
+                        # duration X (how long A is shown)
+                        
+                        # So when we hit checkpoint B at 't', image A was shown from A_start to t.
+                        # Wait, logic check:
+                        # Checkpoints: [(0.0, 1.jpg), (10.0, 2.jpg)]
+                        # At 0.0, 1.jpg starts.
+                        # At 10.0, 2.jpg starts.
+                        # So 1.jpg duration is 10.0.
+                        
+                        if i < len(checkpoints) - 1:
+                            next_t = checkpoints[i+1][0]
+                            dur = next_t - t
+                            f.write(f"file '{img_path}'\n")
+                            f.write(f"duration {dur:.2f}\n")
+                        else:
+                            # Last image until audio end
+                            dur = duration - t
+                            if dur < 0: dur = 0.1 # Safety
+                            f.write(f"file '{img_path}'\n")
+                            f.write(f"duration {dur:.2f}\n")
+                            
+                    # Important: Concat demuxer quirk: add the last file again without duration to ensure the previous duration holds?
+                    # Or just file 'X' duration 'Y'.
+                    # For safety, repeat last entry if needed, but usually duration is enough.
+                
+                # 4. Generate ASS Subtitle
+                # To avoid complex path escaping issues, we create a temporary ASS file in base dir
+                # or use very simple relative path.
+                # Let's use a temp name in target_dir for the moment, then delete it?
+                # Or just rely on relative path 'temp_subs/...' which worked but maybe font issue.
+                
+                ass_filename = f"{base_name}.ass"
+                ass_path = os.path.join(self.target_dir, ass_filename) # Put in root for easy access
+                self.create_ass_file(srt_path, ass_path, self.style)
+                
+                # 5. Run FFmpeg
+                # Since ass_path is in target_dir and we run with cwd=target_dir, we can just use filename.
+                
+                cmd = [
+                    ffmpeg_exe, "-y",
+                    "-f", "concat", "-safe", "0", "-i", concat_list_path,
+                    "-i", mp3_path,
+                    "-vf", f"ass='{ass_filename}'",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                    "-c:a", "aac", "-b:a", "192k",
+                    "-pix_fmt", "yuv420p",
+                    out_path
+                ]
+                
+                creation_flags = 0x08000000 if os.name == 'nt' else 0
+                
+                self.log_signal.emit(f"   🚀 인코딩 중... (FFmpeg Native)")
+                
+                # Execute in target_dir to make relative paths work
+                res = subprocess.run(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    check=False, creationflags=creation_flags, cwd=self.target_dir
+                )
+                
+                if res.returncode != 0:
+                    self.log_signal.emit(f"   ⚠️ FFmpeg Warning: {res.stderr.decode('utf-8')[:300]}...")
+                
+                self.log_signal.emit(f"   ✅ 완료: {base_name}.mp4")
+                count += 1
+                
+                # Cleanup local ASS
+                if os.path.exists(ass_path):
+                    try: os.remove(ass_path)
+                    except: pass
+            
+            # Cleanup Temp Dir
+            if os.path.exists(self.temp_sub_dir):
+                try:
+                    shutil.rmtree(self.temp_sub_dir)
+                    self.log_signal.emit("   🧹 임시 파일 삭제 완료")
+                except Exception as e:
+                    self.log_signal.emit(f"   ⚠️ 임시 폴더 삭제 실패: {e}")
+
+            self.finished.emit(f"작업 완료: 총 {count}개 영상 생성")
+
+        except Exception as e:
+            self.error.emit(f"치명적 오류: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            # Ensure cleanup even on error
+            if os.path.exists(self.temp_sub_dir):
+                try: shutil.rmtree(self.temp_sub_dir)
+                except: pass
+
+    def get_audio_duration(self, ffmpeg_exe, mp3_path):
+        # Use ffprobe logic or simple ffmpeg -i call parsing
+        cmd = [ffmpeg_exe, "-i", mp3_path]
+        try:
+            r = subprocess.run(cmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+            # Duration: 00:00:10.50,
+            out = r.stderr.decode('utf-8')
+            import re
+            m = re.search(r"Duration: (\d+):(\d+):(\d+\.\d+)", out)
+            if m:
+                h, m, s = float(m.group(1)), float(m.group(2)), float(m.group(3))
+                return h*3600 + m*60 + s
+        except:
+            pass
+        return 0.0
+
+    def fix_concat_file(self, path):
+        # Read lines, ensure single quotes frame properties, replace backslash with forward slash
+        print("DEBUG: Executing clean fix_concat_file")
+        lines = []
+        with open(path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        
+        with open(path, 'w', encoding='utf-8') as f:
+            for line in lines:
+                if line.startswith('file'):
+                    # format: file 'path'
+                    parts = line.split("'", 2)
+                    if len(parts) >= 2:
+                        raw_path = parts[1]
+                        fixed_path = raw_path.replace('\\', '/')
+                        f.write(f"file '{fixed_path}'\n")
+                    else:
+                        f.write(line)
+                else:
+                    f.write(line)
+
+
+
+    def parse_srt(self, srt_path):
+        segments = []
+        try:
+            with open(srt_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except UnicodeDecodeError:
+            with open(srt_path, 'r', encoding='cp949') as f:
+                content = f.read()
+            
+        blocks = content.strip().split('\n\n')
+        for block in blocks:
+            lines = block.strip().split('\n')
+            if len(lines) >= 3:
+                try:
+                    idx = int(lines[0].strip())
+                    time_line = lines[1].strip()
+                    text = " ".join(lines[2:])
+                    
+                    if '-->' in time_line:
+                        s_str, e_str = time_line.split('-->')
+                        start = self.parse_time(s_str.strip())
+                        end = self.parse_time(e_str.strip())
+                        
+                        segments.append({
+                            'index': idx,
+                            'start': start,
+                            'end': end,
+                            'text': text
+                        })
+                except:
+                    pass
+        return segments
+
+    def parse_time(self, t_str):
+        # HH:MM:SS,mmm
+        t_str = t_str.replace(',', '.')
+        parts = t_str.split(':')
+        
+        if len(parts) == 3:
+            h = float(parts[0])
+            m = float(parts[1])
+            s = float(parts[2])
+            return h*3600 + m*60 + s
+        return 0.0
+
+    def hex_to_ass_color(self, color_str):
+        # Convert #RRGGBB or names to &H00BBGGRR
+        # Simple map for common names
+        map_name = {
+            'black': '&H00000000', 'white': '&H00FFFFFF', 'red': '&H000000FF', 
+            'green': '&H0000FF00', 'blue': '&H00FF0000', 'yellow': '&H0000FFFF', 'cyan': '&H00FFFF00', 'magenta': '&H00FF00FF',
+            'transparent': '&HFF000000'
+        }
+        if color_str.lower() in map_name:
+            return map_name[color_str.lower()]
+            
+        if color_str.startswith('#'):
+            h = color_str.lstrip('#')
+            if len(h) == 6:
+                r, g, b = h[0:2], h[2:4], h[4:6]
+                return f"&H00{b}{g}{r}" # BGR format
+        
+        return '&H00FFFFFF' # Default white
+
+    def create_ass_file(self, srt_path, ass_path, style):
+        # Convert SRT to ASS with style
+        # 1. Header
+        
+        # Font Handling: ASS needs Family Name, not File Path.
+        # If user passed a file path or name, we try to use a safe Korean font if implied.
+        raw_font = style.get('font_family', 'Arial')
+        font_name = 'Malgun Gothic' # Default safe
+        
+        # If raw_font looks like a simple name (no path separators), use it.
+        # If it has path (e.g. D:\fonts\A.ttf), extract name 'A' but it might not be the family name.
+        # Just fallback to Malgun Gothic or Arial for stability.
+        if os.sep not in raw_font and '/' not in raw_font and not raw_font.lower().endswith('.ttf'):
+            font_name = raw_font
+            
+        font_size = style.get('font_size', 60)
+        primary = self.hex_to_ass_color(style.get('text_color', 'white'))
+        outline = self.hex_to_ass_color(style.get('outline_color', 'black'))
+        back = self.hex_to_ass_color(style.get('bg_color', 'black'))
+        
+        border_style = 1 # Outline
+        border_width = 2
+        
+        if not style.get('use_outline', False):
+            border_width = 0
+            
+        # If BG used, we might need OpaqueBox (BorderStyle=3)
+        if style.get('use_bg', False):
+             border_style = 3
+             if style.get('bg_color') == 'Transparent':
+                  pass 
+             else:
+                  # Use back color for box
+                  pass
+        
+        header = f"""[Script Info]
+ScriptType: v4.00+
+Collisions: Normal
+PlayResX: 1920
+PlayResY: 1080
+WrapStyle: 1
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,{font_name},{font_size},{primary},&H000000FF,{outline},{back},0,0,0,0,100,100,0,0,{border_style},{border_width},0,2,10,10,100,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+        events = []
+        segments = self.parse_srt(srt_path)
+        for seg in segments:
+             # Convert time seconds to H:MM:SS.cs
+             start = self.sec_to_ass_time(seg['start'])
+             end = self.sec_to_ass_time(seg['end'])
+             text = seg['text'].replace('\n', '\\N')
+             events.append(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}")
+             
+        with open(ass_path, "w", encoding='utf-8-sig') as f:
+            f.write(header + "\n".join(events))
+
+    def sec_to_ass_time(self, seconds):
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        s = int(seconds % 60)
+        cs = int((seconds - int(seconds)) * 100)
+        return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+
 
 if __name__ == '__main__':
     sys.excepthook = exception_hook
