@@ -60,6 +60,23 @@ class ElevenLabsClient:
                 f.write(error_msg)
         return keys
 
+    def get_google_keys(self) -> List[Dict]:
+        """Fetch all GOOGLE type API keys from key_manager."""
+        keys = []
+        try:
+            conn = self.get_db_connection()
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("SELECT name, api_key FROM key_mgr WHERE kind='GOOGLE' AND use_yn='Y' AND user_id='admin'")
+            keys = cursor.fetchall()
+            cursor.close()
+            conn.close()
+        except Exception as e:
+            error_msg = f"Error fetching Google API keys: {e}\n"
+            print(error_msg)
+            with open("db_error_log.txt", "a", encoding="utf-8") as f:
+                f.write(error_msg)
+        return keys
+
     def set_api_key(self, api_key: str):
         """Set the API key and re-initialize the client."""
         if not api_key:

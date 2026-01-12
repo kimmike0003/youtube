@@ -377,6 +377,138 @@ class ImageFXMultiTabWorker(GenSparkMultiTabWorker):
         except Exception as e:
             self.error.emit(str(e))
 
+
+class GeminiAPIImageWorker(QThread):
+    progress = pyqtSignal(str)
+    log_signal = pyqtSignal(str)
+    finished = pyqtSignal(str, float)
+    error = pyqtSignal(str)
+
+    def __init__(self, items, api_key, model_name, target_dir):
+        super().__init__()
+        self.items = items
+        self.api_key = api_key
+        self.model_name = model_name
+        self.target_dir = target_dir
+        self.is_running = True
+        os.makedirs(self.target_dir, exist_ok=True)
+    
+    def process_item(self, item):
+        """개별 아이템 처리 (Thread Pool에서 실행됨)"""
+        if not self.is_running: return (False, "중지됨", item)
+
+        num, prompt = item
+        try:
+            # API Call
+            base64_img = self.call_gemini_api(prompt)
+            
+            if base64_img and self.is_running:
+                save_path = os.path.join(self.target_dir, f"{num}.jpg")
+                with open(save_path, "wb") as f:
+                    f.write(base64.b64decode(base64_img))
+                return (True, f"{num}번 저장 완료", item)
+            else:
+                return (False, f"{num}번 생성 실패 (API 응답 없음)", item)
+        except Exception as e:
+            return (False, f"{num}번 에러: {e}", item)
+
+    def run(self):
+        import concurrent.futures
+        start_timestamp = time.time()
+        success_count = 0
+        failed_items = []
+        total = len(self.items)
+        
+        # 병렬 스레드 수 (Rate Limit 고려하여 4개 정도로 설정)
+        MAX_WORKERS = 4
+        self.log_signal.emit(f"🚀 Gemini API 비동기 이미지 생성 시작 (병렬 {MAX_WORKERS}) - 총 {total}장")
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            # Submit all tasks
+            future_to_item = {executor.submit(self.process_item, item): item for item in self.items}
+            
+            completed_count = 0
+            for future in concurrent.futures.as_completed(future_to_item):
+                if not self.is_running:
+                    # 중지 시 남은 작업 취소 시도
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    break
+                    
+                item = future_to_item[future]
+                completed_count += 1
+                
+                try:
+                    success, msg, _ = future.result()
+                    if success:
+                        success_count += 1
+                        self.log_signal.emit(f"  ✅ {msg}")
+                    else:
+                        failed_items.append(item)
+                        self.log_signal.emit(f"  ❌ {msg}")
+                except Exception as e:
+                    failed_items.append(item)
+                    self.log_signal.emit(f"  ❌ 처리 중 예외: {e}")
+                
+                self.progress.emit(f"진행: {completed_count}/{total}")
+
+        if not self.is_running:
+             self.log_signal.emit("🛑 작업이 중지되었습니다.")
+
+        elapsed_time = time.time() - start_timestamp
+        result_msg = f"완료 (성공 {success_count} / 실패 {len(failed_items)})"
+        self.finished.emit(result_msg, elapsed_time)
+
+    def stop(self):
+        self.is_running = False
+
+    def call_gemini_api(self, prompt):
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={self.api_key}"
+        
+        full_text = prompt + " . Ensure the Korean text is rendered clearly. Aspect ratio is 16:9."
+        
+        payload = {
+            "contents": [{
+                "parts": [{"text": full_text}]
+            }],
+            "generationConfig": {
+                "image_config": {
+                    "aspect_ratio": "16:9"
+                }
+            }
+        }
+        
+        headers = {"Content-Type": "application/json"}
+        
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=30)
+            
+            if response.status_code != 200:
+                self.log_signal.emit(f"   ⚠️ API Error {response.status_code}: {response.text}")
+                return None
+                
+            data = response.json()
+            candidates = data.get("candidates", [])
+            if not candidates: 
+                self.log_signal.emit("   ⚠️ No candidates returned")
+                return None
+            
+            candidate = candidates[0]
+            if candidate.get("finishReason") == "SAFETY":
+                 self.log_signal.emit(f"   ⚠️ Safety Check Blocked")
+                 return None
+                 
+            parts = candidate.get("content", {}).get("parts", [])
+            for part in parts:
+                inline_data = part.get("inlineData")
+                if inline_data:
+                    return inline_data.get("data") # Base64 String
+            
+            return None
+            
+        except Exception as e:
+            self.log_signal.emit(f"   ⚠️ Request Exception: {e}")
+            return None
+
 class VideoMergerWorker(QThread):
     progress = pyqtSignal(str)
     log_signal = pyqtSignal(str)
@@ -918,7 +1050,8 @@ class VideoMergerWorker(QThread):
             )
             
             try:
-                out, err = process.communicate(timeout=final_duration*5 + 60) # 타임아웃 넉넉히
+                # [Fix] 8K 업스케일링 등 고부하 작업 시 시간이 오래 걸리므로 타임아웃 대폭 증가
+                out, err = process.communicate(timeout=max(300, final_duration * 20 + 200))
                 if process.returncode != 0:
                     # Show last 1000 chars of error
                     display_err = err[-1000:] if len(err) > 1000 else err
@@ -1950,77 +2083,7 @@ class VideoConcatenatorWorkerOld(QThread):
             import traceback
             traceback.print_exc()
 
-class AudioNormalWorker(QThread):
-    log_signal = pyqtSignal(str)
-    finished = pyqtSignal(str) # msg
-    error = pyqtSignal(str)
 
-    def __init__(self, input_dir, output_dir):
-        super().__init__()
-        self.input_dir = input_dir
-        self.output_dir = output_dir
-
-    def run(self):
-        try:
-            # 0. FFmpeg 준비
-            try:
-                import imageio_ffmpeg
-                ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-            except ImportError:
-                ffmpeg_exe = "ffmpeg"
-
-            if not os.path.exists(self.input_dir):
-                self.error.emit(f"❌ 입력 폴더 없음: {self.input_dir}")
-                return
-                
-            if not os.path.exists(self.output_dir):
-                os.makedirs(self.output_dir, exist_ok=True)
-
-            files = [f for f in os.listdir(self.input_dir) if f.lower().endswith('.mp3')]
-            if not files:
-                self.error.emit("❌ MP3 파일이 없습니다.")
-                return
-
-            total = len(files)
-            self.log_signal.emit(f"🔊 오디오 평준화(Normalization) 시작... 총 {total}개")
-            
-            success_count = 0
-            
-            # Windows creation flags
-            creation_flags = 0x08000000 if os.name == 'nt' else 0
-
-            for i, filename in enumerate(files):
-                in_path = os.path.join(self.input_dir, filename)
-                out_path = os.path.join(self.output_dir, filename)
-                
-                self.log_signal.emit(f"[{i+1}/{total}] 처리 중: {filename}")
-                
-                # loudnorm filter
-                cmd = [
-                    ffmpeg_exe, "-y", "-i", in_path,
-                    "-filter:a", "loudnorm,aresample=48000",
-                    "-c:a", "libmp3lame", "-q:a", "2",
-                    out_path
-                ]
-                
-                try:
-                    subprocess.run(
-                        cmd, 
-                        stdout=subprocess.PIPE, 
-                        stderr=subprocess.PIPE, 
-                        check=True,
-                        creationflags=creation_flags
-                    )
-                    success_count += 1
-                except subprocess.CalledProcessError as e:
-                    self.log_signal.emit(f"   ❌ 실패: {e.stderr.decode('utf-8') if e.stderr else 'Unknown Error'}")
-                except Exception as ex:
-                    self.log_signal.emit(f"   ❌ 오류: {ex}")
-
-            self.finished.emit(f"작업 완료 (성공 {success_count}/{total})")
-
-        except Exception as e:
-            self.error.emit(f"치명적 오류: {e}")
 
 class CustomTabWidget(QWidget):
     def __init__(self, parent=None):
@@ -2132,6 +2195,11 @@ class MainApp(QWidget):
         self.initTabImageFX()
         self.tabs.addTab(self.tab_fx, "ImageFX Image")
 
+        # 3. Gemini API Image
+        self.tab_gemini = QWidget()
+        self.initTabGeminiAPI()
+        self.tabs.addTab(self.tab_gemini, "Gemini API Image")
+
         # 3. ElevenLabs TTS
         self.tab2 = QWidget()
         self.initTab2()
@@ -2179,10 +2247,7 @@ class MainApp(QWidget):
         self.initTabFTP()
         self.tabs.addTab(self.tab_ftp, "FTP Upload")
 
-        # 12. Audio Normal
-        self.tab_audio_normal = QWidget()
-        self.initTabAudioNormal()
-        self.tabs.addTab(self.tab_audio_normal, "Audio Normal")
+
 
         self.setLayout(layout)
 
@@ -3540,6 +3605,142 @@ class MainApp(QWidget):
                     pass
         log_widget.append(f"✅ total {count} images compressed.")
 
+    def initTabGeminiAPI(self):
+        layout = QVBoxLayout()
+        
+        self.status_label_gemini = QLabel("1단계: API Key와 모델을 선택하세요.")
+        self.status_label_gemini.setStyleSheet("font-size: 15px; font-weight: bold; color: #D4D4D4;")
+        layout.addWidget(self.status_label_gemini)
+        
+        # API Key Selection
+        key_layout = QHBoxLayout()
+        self.combo_gemini_key = QComboBox()
+        # Load Keys
+        try:
+            if hasattr(self, 'tts_client') and self.tts_client:
+                keys = self.tts_client.get_google_keys()
+            else:
+                from elevenlabs_client import ElevenLabsClient
+                self.tts_client = ElevenLabsClient()
+                keys = self.tts_client.get_google_keys()
+                
+            for k in keys:
+                self.combo_gemini_key.addItem(k['name'], k['api_key'])
+        except Exception as e:
+            self.status_label_gemini.setText(f"API Key 로드 실패: {e}")
+
+        key_layout.addWidget(QLabel("Google API Key:"))
+        key_layout.addWidget(self.combo_gemini_key)
+        layout.addLayout(key_layout)
+        
+        # Model Selection
+        idx_layout = QHBoxLayout()
+        self.combo_gemini_model = QComboBox()
+        self.combo_gemini_model.addItem("Gemini 3.0 Pro (Preview)", "gemini-3-pro-image-preview")
+        self.combo_gemini_model.addItem("Gemini 2.5 Flash", "gemini-2.5-flash-image")
+        
+        idx_layout.addWidget(QLabel("Model:"))
+        idx_layout.addWidget(self.combo_gemini_model)
+        layout.addLayout(idx_layout)
+
+        # Path
+        path_layout = QHBoxLayout()
+        self.gemini_save_dir = QLineEdit(r"D:\youtube")
+        btn_browse_gemini = QPushButton("저장 폴더")
+        btn_browse_gemini.clicked.connect(lambda: self.browse_folder(self.gemini_save_dir))
+        path_layout.addWidget(QLabel("저장 폴더:"))
+        path_layout.addWidget(self.gemini_save_dir)
+        path_layout.addWidget(btn_browse_gemini)
+        layout.addLayout(path_layout)
+        
+        # Prompt
+        layout.addWidget(QLabel("이미지 프롬프트 입력 (형식: 2. {프롬프트 내용})"))
+        self.gemini_prompt_input = QTextEdit()
+        self.gemini_prompt_input.setPlaceholderText("2. {Cute cat in Korea ...}\n2-1 설명...")
+        self.gemini_prompt_input.setStyleSheet("background-color: #1E1E1E; color: #D4D4D4;")
+        layout.addWidget(self.gemini_prompt_input)
+        
+        # Buttons
+        btn_h_layout = QHBoxLayout()
+        self.btn_gemini_start = QPushButton("🚀 2. 이미지 가져오기 (API 호출)")
+        self.btn_gemini_start.setStyleSheet("height: 50px; font-weight: bold; background-color: #2196F3; color: white; border-radius: 8px;")
+        self.btn_gemini_start.clicked.connect(self.start_gemini_automation)
+        
+        self.btn_gemini_stop = QPushButton("🛑 중지")
+        self.btn_gemini_stop.setEnabled(False)
+        self.btn_gemini_stop.setStyleSheet("height: 50px; font-weight: bold; background-color: #dc3545; color: white; border-radius: 8px;")
+        self.btn_gemini_stop.clicked.connect(self.stop_gemini_automation)
+        
+        btn_h_layout.addWidget(self.btn_gemini_start)
+        btn_h_layout.addWidget(self.btn_gemini_stop)
+        layout.addLayout(btn_h_layout)
+        
+        # Compress
+        self.btn_gemini_compress = QPushButton("🗜️ 3. 이미지 압축 (용량 줄이기)")
+        self.btn_gemini_compress.setStyleSheet("height: 40px; font-weight: bold; background-color: #FF9800; color: white; border-radius: 8px; margin-top: 5px;")
+        self.btn_gemini_compress.clicked.connect(lambda: self.compress_images(dir_path=self.gemini_save_dir.text().strip()))
+        layout.addWidget(self.btn_gemini_compress)
+
+        # Log
+        self.gemini_log = QTextEdit()
+        self.gemini_log.setReadOnly(True)
+        self.gemini_log.setStyleSheet("background-color: #1E1E1E; color: #D4D4D4;")
+        layout.addWidget(self.gemini_log)
+        
+        self.tab_gemini.setLayout(layout)
+
+    def start_gemini_automation(self):
+        api_key = self.combo_gemini_key.currentData()
+        if not api_key:
+            QMessageBox.warning(self, "경고", "API Key가 선택되지 않았습니다.")
+            return
+
+        model_name = self.combo_gemini_model.currentData()
+        save_dir = self.gemini_save_dir.text().strip()
+        text = self.gemini_prompt_input.toPlainText().strip()
+        
+        if not text:
+             QMessageBox.warning(self, "경고", "프롬프트를 입력하세요.")
+             return
+             
+        # Parse
+        items = re.findall(r'(\d+)\s*\.\s*\{(.*?)\}', text, re.DOTALL)
+        if not items:
+            self.gemini_log.append("❌ 프롬프트 형식이 올바르지 않습니다 (예: 2. {프롬프트})")
+            return
+            
+        self.btn_gemini_start.setEnabled(False)
+        self.btn_gemini_stop.setEnabled(True)
+        self.gemini_log.append(f"🚀 Gemini API 이미지 생성 시작 ({len(items)}장)")
+        
+        self.gemini_worker = GeminiAPIImageWorker(items, api_key, model_name, save_dir)
+        self.gemini_worker.log_signal.connect(self.gemini_log.append)
+        self.gemini_worker.progress.connect(self.status_label_gemini.setText)
+        self.gemini_worker.finished.connect(self.on_gemini_success)
+        self.gemini_worker.error.connect(self.on_gemini_error)
+        self.gemini_worker.start()
+        
+    def stop_gemini_automation(self):
+        if hasattr(self, 'gemini_worker'):
+            self.gemini_worker.stop()
+            self.gemini_log.append("🛑 중지 요청됨...")
+            self.btn_gemini_stop.setEnabled(False)
+
+    def on_gemini_success(self, msg, elapsed):
+        self.btn_gemini_start.setEnabled(True)
+        self.btn_gemini_stop.setEnabled(False)
+        self.gemini_log.append(f"🏁 {msg} ({elapsed:.1f}s)")
+        
+        # Auto compress (Disabled by user request)
+        # self.gemini_log.append("🔄 생성 완료: 자동 압축(JPG 변환)을 시작합니다...")
+        # self.compress_images(dir_path=self.gemini_save_dir.text().strip())
+        self.gemini_log.append("ℹ️ 생성된 이미지는 원본 화질 그대로 저장되었습니다.")
+
+    def on_gemini_error(self, err):
+        self.btn_gemini_start.setEnabled(True)
+        self.btn_gemini_stop.setEnabled(False)
+        self.gemini_log.append(f"❗ 오류: {err}")
+
     def browse_audio_path(self):
         path = QFileDialog.getExistingDirectory(self, "오디오 저장 폴더 선택")
         if path:
@@ -4070,66 +4271,7 @@ class MainApp(QWidget):
             self.log_youtube.append(f"🌐 링크 열기: {url}")
             webbrowser.open(url)            
 
-    def initTabAudioNormal(self):
-        layout = QVBoxLayout()
-        
-        # 안내
-        layout.addWidget(QLabel("📢 MP3 오디오 파일의 볼륨을 일정하게 평준화(Normalization) 합니다."))
-        layout.addWidget(QLabel("   (ElevenLabs 자막 싱크(Duration)에 영향을 주지 않으므로 안심하고 사용하세요.)"))
 
-        # 폴더 선택 그룹
-        dir_group = QGroupBox("폴더 선택")
-        dir_layout = QGridLayout()
-        
-        self.an_input_dir = QLineEdit(r"D:\youtube")
-        btn_in = QPushButton("입력 폴더")
-        btn_in.clicked.connect(lambda: self.browse_folder(self.an_input_dir))
-        
-        self.an_output_dir = QLineEdit(r"D:\youtube\normalized")
-        btn_out = QPushButton("출력 폴더")
-        btn_out.clicked.connect(lambda: self.browse_folder(self.an_output_dir))
-        
-        dir_layout.addWidget(QLabel("입력(원본) 폴더:"), 0, 0)
-        dir_layout.addWidget(self.an_input_dir, 0, 1)
-        dir_layout.addWidget(btn_in, 0, 2)
-        
-        dir_layout.addWidget(QLabel("출력(저장) 폴더:"), 1, 0)
-        dir_layout.addWidget(self.an_output_dir, 1, 1)
-        dir_layout.addWidget(btn_out, 1, 2)
-        
-        dir_group.setLayout(dir_layout)
-        layout.addWidget(dir_group)
-        
-        # 시작 버튼
-        self.btn_start_an = QPushButton("🔊 오디오 평준화 시작 (Start Normalization)")
-        self.btn_start_an.setStyleSheet("height: 50px; font-weight: bold; background-color: #009688; color: white; border-radius: 8px;")
-        self.btn_start_an.clicked.connect(self.start_audio_normal)
-        layout.addWidget(self.btn_start_an)
-        
-        # 로그
-        self.an_log = QTextEdit()
-        self.an_log.setReadOnly(True)
-        self.an_log.setStyleSheet("background-color: #1E1E1E; color: #D4D4D4;")
-        layout.addWidget(self.an_log)
-        
-        self.tab_audio_normal.setLayout(layout)
-
-    def start_audio_normal(self):
-        i_path = self.an_input_dir.text().strip()
-        o_path = self.an_output_dir.text().strip()
-        
-        if not os.path.exists(i_path):
-            QMessageBox.warning(self, "경고", "입력 폴더가 존재하지 않습니다.")
-            return
-
-        self.btn_start_an.setEnabled(False)
-        self.an_log.append("⏳ 작업 시작...")
-        
-        self.an_worker = AudioNormalWorker(i_path, o_path)
-        self.an_worker.log_signal.connect(self.an_log.append)
-        self.an_worker.finished.connect(lambda m: [self.an_log.append(f"🏁 {m}"), self.btn_start_an.setEnabled(True)])
-        self.an_worker.error.connect(lambda e: [self.an_log.append(f"❌ {e}"), self.btn_start_an.setEnabled(True)])
-        self.an_worker.start()
 
     def start_batch_video_effect(self):
         input_dir = self.eff_input_dir.text().strip()
@@ -4843,6 +4985,7 @@ class AudioTranscriberWorker(QThread):
         self.model_name = model_name
 
     def run(self):
+        job_start_time = time.time()
         try:
             # 1. FFmpeg Check (Common)
             # 1. FFmpeg Check & Setup for Whisper
@@ -4976,8 +5119,8 @@ class AudioTranscriberWorker(QThread):
                                     start_time = segment["start"]
                                     end_time = segment["end"]
                                     
-                                    # 20자 제한 체크 및 분할
-                                    if len(original_text) > 20:
+                                    # 26자 제한 체크 및 분할
+                                    if len(original_text) > 26:
                                         # 간단한 공백 기준 분리 후 재조합 방식
                                         words = original_text.split()
                                         chunks = []
@@ -4985,13 +5128,13 @@ class AudioTranscriberWorker(QThread):
                                         current_len = 0
                                         
                                         for word in words:
-                                            if current_len + len(word) + (1 if current_chunk else 0) > 20:
+                                            if current_len + len(word) + (1 if current_chunk else 0) > 26:
                                                 if current_chunk:
                                                     chunks.append(" ".join(current_chunk))
                                                     current_chunk = [word]
                                                     current_len = len(word)
                                                 else:
-                                                    # 단어 하나가 20자 넘는 경우 (거의 없겠지만)
+                                                    # 단어 하나가 26자 넘는 경우 (거의 없겠지만)
                                                     chunks.append(word)
                                                     current_chunk = []
                                                     current_len = 0
@@ -5031,7 +5174,7 @@ class AudioTranscriberWorker(QThread):
                                             current_start = chunk_end
                                             
                                     else:
-                                        # 20자 이하: 그대로 출력
+                                        # 26자 이하: 그대로 출력
                                         srt_file.write(f"{srt_index}\n")
                                         srt_file.write(f"{self.format_timestamp(start_time)} --> {self.format_timestamp(end_time)}\n")
                                         srt_file.write(f"{original_text}\n\n")
@@ -5042,7 +5185,8 @@ class AudioTranscriberWorker(QThread):
                         except Exception as e:
                             self.log_signal.emit(f"   ❌ 실패 ({f_name}): {e}")
 
-            self.finished.emit("모든 작업이 완료되었습니다.")
+            elapsed_time = time.time() - job_start_time
+            self.finished.emit(f"모든 작업이 완료되었습니다. (소요시간: {elapsed_time:.2f}초)")
 
         except Exception as e:
             self.error.emit(f"치명적 오류: {e}")
