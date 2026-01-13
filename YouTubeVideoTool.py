@@ -188,6 +188,43 @@ class GenSparkMultiTabWorker(QThread):
             return None
 
 
+    # [NEW] Multi-Image Check
+    def check_images_multiple(self, driver, old_srcs):
+        try:
+            # 1. 문서 내 모든 이미지 수집
+            # 2. old_srcs에 없는거 필터링
+            # 3. base64인지 확인
+            # 4. 리스트 반환
+            
+            script = """
+            var old_srcs = arguments[0];
+            var imgs = Array.from(document.querySelectorAll('img'));
+            var new_data = [];
+            
+            for (var img of imgs) {
+                var src = img.src;
+                if (!src) continue;
+                if (src.startsWith('data:image/svg')) continue; // 아이콘 제외
+                if (src.length < 5000) continue; // 썸네일/아이콘 제외
+                
+                // Old Srcs에 포함되어 있는지 확인
+                // (완전 일치 혹은 일부 일치? 완전 일치로 충분할듯)
+                if (old_srcs.includes(src)) continue;
+                
+                // Base64 데이터 추출
+                if (src.startsWith('data:image')) {
+                     var b64 = src.split(',')[1];
+                     if (b64) new_data.push(b64);
+                }
+            }
+            return new_data;
+            """
+            result = driver.execute_script(script, old_srcs)
+            return result if result else []
+            
+        except Exception:
+            return []
+
 class ImageFXMultiTabWorker(GenSparkMultiTabWorker):
     def run(self):
         start_timestamp = time.time()
@@ -278,29 +315,34 @@ class ImageFXMultiTabWorker(GenSparkMultiTabWorker):
                         p_text = prompt.strip()
                         
                         try:
-                            import pyperclip
-                            pyperclip.copy(p_text)
-                            
-                            # ActionChains로 Ctrl+A -> Del -> Ctrl+V 수행
-                            # input_box가 있으면 거기로, 없으면 현재 포커스된 곳에
+                            # [CHANGED] 다시 타이핑 방식으로 변경 (JS 주입 실패 피드백 반영)
                             actions = ActionChains(self.driver)
-                            
                             if input_box:
-                                actions.move_to_element(input_box)
-                                actions.click()
-                            
-                            # 기존 내용 지우기 (Ctrl+A, Del)
-                            actions.key_down(Keys.CONTROL).send_keys('a').key_up(Keys.CONTROL).pause(0.1).send_keys(Keys.DELETE).pause(0.2)
-                            
-                            # 붙여넣기 (Ctrl+V)
-                            actions.key_down(Keys.CONTROL).send_keys('v').key_up(Keys.CONTROL).pause(0.5)
-                            actions.perform()
+                                actions.move_to_element(input_box).click()
+                                
+                                # Clear (Ctrl+A -> Del)
+                                actions.key_down(Keys.CONTROL).send_keys('a').key_up(Keys.CONTROL).pause(0.1).send_keys(Keys.DELETE).pause(0.1)
+                                
+                                # Typing directly (타이핑 하듯이 입력)
+                                actions.send_keys(p_text)
+                                
+                                # Activate Button (Trigger: Space -> Backspace)
+                                actions.pause(0.5).send_keys(" ").pause(0.1).send_keys(Keys.BACKSPACE).perform()
+                                
+                            else:
+                                # InputBox 못 찾았을 경우 fallback
+                                actions.send_keys(p_text).pause(0.2)
+                                actions.send_keys(" ").pause(0.1).send_keys(Keys.BACKSPACE).perform()
                             
                         except Exception as e:
                             self.log_signal.emit(f"⚠️ 입력 실패: {e}")
-                            # 최후의 수단: JS 값 주입
+                            # 최후의 수단: JS 값 주입 및 이벤트 강제 발생
                             if input_box:
-                                self.driver.execute_script("arguments[0].innerText = arguments[1];", input_box, p_text)
+                                self.driver.execute_script("""
+                                    arguments[0].innerText = arguments[1];
+                                    arguments[0].dispatchEvent(new Event('input', { bubbles: true }));
+                                    arguments[0].dispatchEvent(new Event('change', { bubbles: true }));
+                                """, input_box, p_text)
 
                         time.sleep(1)
                         
@@ -343,26 +385,71 @@ class ImageFXMultiTabWorker(GenSparkMultiTabWorker):
                         except:
                             pass
                         
-                        tab_status[tab] = {"item": current_item, "start_time": time.time()}
+                        # [Modified] 상태 정보에 'saved_count' 추가 (4장 저장 목표)
+                        tab_status[tab] = {"item": current_item, "start_time": time.time(), "saved_count": 0, "found_srcs": []}
                         item_idx += 1
                         self.progress.emit(f"진행: {processed_count}/{total}")
 
                     elif tab_status[tab] is not None:
                         target_num = tab_status[tab]["item"][0]
-                        img_data = self.check_image_once(self.driver, tab_old_srcs[tab])
+                        # [NEW] 다중 이미지 확인 로직
+                        new_images = self.check_images_multiple(self.driver, tab_old_srcs[tab])
                         
-                        if img_data:
-                            save_path = os.path.join(self.target_dir, f"{target_num}.png")
-                            with open(save_path, "wb") as f:
-                                f.write(base64.b64decode(img_data))
-                            self.log_signal.emit(f"  ✅ [탭 {tabs.index(tab)+1}] {target_num}번 저장 완료")
+                        # 이미 저장한 이미지는 제외
+                        current_found = tab_status[tab]["found_srcs"]
+                        cnt = tab_status[tab]["saved_count"]
+                        
+                        # 새로 발견된 이미지 중 아직 처리 안 한 것만 필터링 (Base64 앞부분 비교 등은 너무 기니까, JS에서 중복 걸러주긴 함)
+                        # 하지만 JS는 'old_srcs'(생성 전)와 비교함.
+                        # 여기서는 이번 생성 턴에서 이미 저장한 것과 중복 방지가 필요할 수 있으나, 
+                        # check_images_multiple이 매번 '새로운 것'을 다 리턴해주면 리스트가 계속 커짐.
+                        # -> JS 로직을 수정하거나, 여기서 관리.
+                        # JS는 "old_srcs에 없는 모든 것"을 리턴함. 즉, 이번 턴에 생긴 1,2,3,4가 계속 리턴됨.
+                        
+                        saved_in_this_loop = 0
+                        for img_b64 in new_images:
+                            # 간단한 중복 체크 (해시값 혹은 길이+앞부분)
+                            img_sig = str(len(img_b64)) + img_b64[:30]
+                            if img_sig in current_found:
+                                continue
+                                
+                            current_found.append(img_sig)
+                            cnt += 1
+                            
+                            # 파일명: 1-1.png, 1-2.png ...
+                            save_name = f"{target_num}-{cnt}.png"
+                            save_path = os.path.join(self.target_dir, save_name)
+                            
+                            try:
+                                with open(save_path, "wb") as f:
+                                    f.write(base64.b64decode(img_b64))
+                                self.log_signal.emit(f"  ✅ [탭 {tabs.index(tab)+1}] {save_name} 저장 완료")
+                                saved_in_this_loop += 1
+                            except Exception as e:
+                                self.log_signal.emit(f"  ❌ 저장 실패 ({save_name}): {e}")
+
+                        tab_status[tab]["saved_count"] = cnt
+                        
+                        # 종료 조건: 4장 이상 저장했거나, 시간 초과되었는데 1장이라도 건졌거나
+                        is_timeout = (time.time() - tab_status[tab]["start_time"] > 60) # 4장 다 나오는데 보통 30초 내외
+                        if cnt >= 4:
                             tab_status[tab] = None
                             processed_count += 1
-                        
-                        elif time.time() - tab_status[tab]["start_time"] > 250: # ImageFX는 조금 더 느릴 수 있음
-                            self.log_signal.emit(f"  ❌ [탭 {tabs.index(tab)+1}] {target_num}번 타임아웃")
-                            failed_items.append(tab_status[tab]["item"])
-                            tab_status[tab] = None
+                        elif is_timeout:
+                            if cnt > 0:
+                                self.log_signal.emit(f"  ⚠️ [탭 {tabs.index(tab)+1}] {target_num}번: {cnt}장 저장 후 이동 (타임아웃)")
+                                tab_status[tab] = None # 부분 성공 처리
+                                processed_count += 1
+                            else:
+                                # 진짜 타임아웃 (0장) -> Max Timeout (250s)까지 대기해야 할까?
+                                # 위 60초는 "4장 모으기"를 위한 소프트 타임아웃. 
+                                # 아예 생성이 안된거면 더 기다려야 함.
+                                real_timeout = 250
+                                if time.time() - tab_status[tab]["start_time"] > real_timeout:
+                                    self.log_signal.emit(f"  ❌ [탭 {tabs.index(tab)+1}] {target_num}번 실패 (타임아웃)")
+                                    failed_items.append(tab_status[tab]["item"])
+                                    tab_status[tab] = None
+                                    processed_count += 1
                             processed_count += 1
                 
                 time.sleep(1)
@@ -2208,24 +2295,24 @@ class MainApp(QWidget):
         # 4. Video Composite
         self.tab3 = QWidget()
         self.initTab3()
-        self.tabs.addTab(self.tab3, "Video Composite")
+        self.tabs.addTab(self.tab3, "자막설정")
 
         # 5. Video Dubbing
         self.tab6 = QWidget()
         self.initTab6()
-        self.tabs.addTab(self.tab6, "Video Dubbing")
+        self.tabs.addTab(self.tab6, "영상+자막")
 
         # 6. Video Effects
         self.tab5 = QWidget()
         self.initTab5()
-        self.tabs.addTab(self.tab5, "Video Effects")
+        self.tabs.addTab(self.tab5, "영상효과")
 
         # ========== 2단 (Lower Row) ==========
 
         # 7. Video Concat
         self.tab4 = QWidget()
         self.initTab4()
-        self.tabs.addTab(self.tab4, "Video Concat")
+        self.tabs.addTab(self.tab4, "최종영상")
 
         # 8. Audio Transcribe
         self.tab_transcribe = QWidget()
@@ -2836,12 +2923,11 @@ class MainApp(QWidget):
         
         effect_layout.addWidget(QLabel("Pan 속도(배속):"), 2, 0)
         effect_layout.addWidget(self.spin_pan_speed, 2, 1)
-        
         effect_group.setLayout(effect_layout)
         layout.addWidget(effect_group)
 
         # 스타일 정보 안내 (트리밍 바로 밑으로 이동)
-        share_label = QLabel("ℹ️ 상단 Video Composite 탭의 스타일 설정(폰트, 색상, 소리 볼륨 등)이 공유됩니다.")
+        share_label = QLabel("ℹ️ 상단 자막설정 탭의 스타일 설정(폰트, 색상, 소리 볼륨 등)이 공유됩니다.")
         share_label.setStyleSheet("color: #008CBA; font-style: italic; margin-bottom: 5px;")
         layout.addWidget(share_label)
 
@@ -2884,7 +2970,7 @@ class MainApp(QWidget):
         layout.addWidget(file_group)
 
         # 스타일 안내
-        layout.addWidget(QLabel("ℹ️ 자막 스타일(폰트, 크기, 색상)은 'Video Composite' 탭의 설정을 따릅니다."))
+        layout.addWidget(QLabel("ℹ️ 자막 스타일(폰트, 크기, 색상)은 '자막설정' 탭의 설정을 따릅니다."))
 
         # 시작 버튼
         self.btn_start_dubbing = QPushButton("🎬 일괄 더빙 시작 (Batch Start)")
