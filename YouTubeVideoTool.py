@@ -2452,11 +2452,11 @@ class MainApp(QWidget):
         """)
         self.btn_fx_start.clicked.connect(self.start_automation_imagefx)
 
-        self.btn_fx_stop = QPushButton("🛑 중지")
+        self.btn_fx_stop = QPushButton("🔴 중지")
         self.btn_fx_stop.setEnabled(False)
         self.btn_fx_stop.setStyleSheet("""
-            QPushButton { height: 50px; font-weight: bold; background-color: #dc3545; color: white; border-radius: 8px; }
-            QPushButton:disabled { background-color: #6c757d; }
+            QPushButton { height: 50px; font-weight: bold; background-color: #6c757d; color: white; border-radius: 8px; }
+            QPushButton:disabled { background-color: #454d55; color: #aaa; }
         """)
         self.btn_fx_stop.clicked.connect(self.stop_automation_imagefx)
 
@@ -2813,11 +2813,21 @@ class MainApp(QWidget):
         layout.addWidget(path_group)
 
 
-        # 합치기 버튼
+        # 합치기/중지 버튼 (Horizontal Layout)
+        btn_layout = QHBoxLayout()
+        
         self.btn_start_concat = QPushButton("🎞️ 영상 하나로 합치기 (Combine Videos)")
         self.btn_start_concat.setStyleSheet("height: 50px; font-weight: bold; background-color: #ff5722; color: white; border-radius: 8px;")
         self.btn_start_concat.clicked.connect(self.start_video_concat)
-        layout.addWidget(self.btn_start_concat)
+        
+        self.btn_stop_concat = QPushButton("🛑 중지 (Stop)")
+        self.btn_stop_concat.setEnabled(False)
+        self.btn_stop_concat.setStyleSheet("height: 50px; font-weight: bold; background-color: #dc3545; color: white; border-radius: 8px;")
+        self.btn_stop_concat.clicked.connect(self.stop_video_concat)
+        
+        btn_layout.addWidget(self.btn_start_concat)
+        btn_layout.addWidget(self.btn_stop_concat)
+        layout.addLayout(btn_layout)
 
         # 로그창
         layout.addWidget(QLabel("진행 로그:"))
@@ -2931,11 +2941,21 @@ class MainApp(QWidget):
         share_label.setStyleSheet("color: #008CBA; font-style: italic; margin-bottom: 5px;")
         layout.addWidget(share_label)
 
-        # 생성 버튼
+        # 생성/중지 버튼 (Horizontal Layout)
+        btn_layout = QHBoxLayout()
+        
         self.btn_start_single = QPushButton("🎬 영상 효과 적용 일괄 시작 (Batch Effect)")
         self.btn_start_single.setStyleSheet("height: 50px; font-weight: bold; background-color: #008CBA; color: white; border-radius: 8px;")
         self.btn_start_single.clicked.connect(self.start_batch_video_effect)
-        layout.addWidget(self.btn_start_single)
+        
+        self.btn_stop_single = QPushButton("🛑 중지 (Stop)")
+        self.btn_stop_single.setEnabled(False)
+        self.btn_stop_single.setStyleSheet("height: 50px; font-weight: bold; background-color: #dc3545; color: white; border-radius: 8px;")
+        self.btn_stop_single.clicked.connect(self.stop_batch_video_effect)
+        
+        btn_layout.addWidget(self.btn_start_single)
+        btn_layout.addWidget(self.btn_stop_single)
+        layout.addLayout(btn_layout)
 
         # 로그
         self.single_log = QTextEdit()
@@ -3188,16 +3208,18 @@ class MainApp(QWidget):
             return
 
         self.btn_start_concat.setEnabled(False)
+        self.btn_stop_concat.setEnabled(True)
         self.concat_log.append("⏳ 영상 합치기 작업을 시작합니다...")
 
         self.concat_worker = VideoConcatenatorWorker(in_dir, out_file, wm_path) # Pass wm_path
         self.concat_worker.log_signal.connect(self.concat_log.append)
         self.concat_worker.finished.connect(self.on_video_concat_finished)
-        self.concat_worker.error.connect(lambda e: self.concat_log.append(f"❌ 오류: {e}"))
+        self.concat_worker.error.connect(lambda e: [self.concat_log.append(f"❌ 오류: {e}"), self.btn_start_concat.setEnabled(True), self.btn_stop_concat.setEnabled(False)])
         self.concat_worker.start()
 
     def on_video_concat_finished(self, msg, elapsed):
         self.btn_start_concat.setEnabled(True)
+        self.btn_stop_concat.setEnabled(False)
         h, m, s = int(elapsed // 3600), int((elapsed % 3600) // 60), int(elapsed % 60)
         self.concat_log.append(f"{msg} (소요 시간: {h:02d}:{m:02d}:{s:02d})")
 
@@ -4403,6 +4425,7 @@ class MainApp(QWidget):
         }
 
         self.btn_start_single.setEnabled(False)
+        self.btn_stop_single.setEnabled(True)
         self.single_log.append(f"⏳ 일괄 작업 시작: {input_dir}")
         self.single_log.append(f"   출력 대상: {output_dir}")
 
@@ -4411,8 +4434,20 @@ class MainApp(QWidget):
         )
         self.batch_eff_worker.log_signal.connect(self.single_log.append)
         self.batch_eff_worker.finished.connect(self.on_batch_eff_finished)
-        self.batch_eff_worker.error.connect(lambda e: [self.single_log.append(f"❌ {e}"), self.btn_start_single.setEnabled(True)])
+        self.batch_eff_worker.error.connect(lambda e: [self.single_log.append(f"❌ {e}"), self.btn_start_single.setEnabled(True), self.btn_stop_single.setEnabled(False)])
         self.batch_eff_worker.start()
+
+    def stop_batch_video_effect(self):
+        if hasattr(self, 'batch_eff_worker') and self.batch_eff_worker.isRunning():
+            self.batch_eff_worker.stop()
+            self.btn_stop_single.setEnabled(False)
+            self.single_log.append("🛑 중지 요청 중...")
+
+    def stop_video_concat(self):
+        if hasattr(self, 'concat_worker') and self.concat_worker.isRunning():
+            self.concat_worker.stop()
+            self.btn_stop_concat.setEnabled(False)
+            self.concat_log.append("🛑 중지 요청 중...")
 
     def initTabAudioToVideo(self):
         layout = QVBoxLayout()
@@ -4493,6 +4528,7 @@ class MainApp(QWidget):
         time_str = f" ({h:02d}:{m:02d}:{s:02d})"
         self.single_log.append(f"🏁 {msg}{time_str}")
         self.btn_start_single.setEnabled(True)
+        self.btn_stop_single.setEnabled(False)
 
     def initTabAudioTranscribe(self):
         layout = QVBoxLayout()
@@ -4667,6 +4703,15 @@ class BatchVideoEffectWorker(VideoMergerWorker):
         self.input_dir = input_dir
         self.output_dir = output_dir
         self.effect_config = effect_config # 부모 process_single_video가 이 속성을 참조하여 효과 적용
+        self.is_running = True
+        self.executor = None
+
+    def stop(self):
+        self.is_running = False
+        if self.executor:
+            # 보류 중인 작업 취소
+            self.executor.shutdown(wait=False, cancel_futures=True)
+            self.log_signal.emit("🛑 중지 요청: 남은 대기 작업을 취소합니다.")
         
     def run(self):
         start_time = time.time()
@@ -4756,11 +4801,15 @@ class BatchVideoEffectWorker(VideoMergerWorker):
             max_workers = min(2, multiprocessing.cpu_count()) # 8K 고화질 처리로 인해 메모리 보호차원 2개 제한
             success_count = 0
             
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+            with self.executor as executor:
                 # {future: (base_name, output_path)}
                 future_to_info = {executor.submit(self.process_single_video, task): task[3] for task in tasks}
                 
                 for future in concurrent.futures.as_completed(future_to_info):
+                    if not self.is_running:
+                        self.log_signal.emit("🛑 사용자에 의해 중지되었습니다.")
+                        break
                     task_base = future_to_info[future]
                     try:
                         res = future.result()
@@ -4790,6 +4839,12 @@ class VideoConcatenatorWorker(QThread):
         self.video_dir = video_dir
         self.output_file = output_file
         self.watermark_path = watermark_path
+        self.process = None
+
+    def stop(self):
+        if self.process:
+            self.process.kill()
+            self.log_signal.emit("🛑 FFmpeg 프로세스를 강제 종료합니다.")
 
     def run(self):
         start_time = time.time()
@@ -4847,7 +4902,7 @@ class VideoConcatenatorWorker(QThread):
             self.log_signal.emit(f"🚀 합치기 실행 (파일 리스트 방식)...")
             
             creation_flags = 0x08000000 if os.name == 'nt' else 0
-            process = subprocess.Popen(
+            self.process = subprocess.Popen(
                 command, 
                 stdout=subprocess.PIPE, 
                 stderr=subprocess.PIPE, 
@@ -4856,9 +4911,9 @@ class VideoConcatenatorWorker(QThread):
                 creationflags=creation_flags
             )
             
-            stdout, stderr = process.communicate()
+            stdout, stderr = self.process.communicate()
             
-            if process.returncode != 0:
+            if self.process.returncode != 0:
                 self.error.emit(f"❌ FFmpeg 오류: {stderr}")
             else:
                 elapsed = time.time() - start_time
