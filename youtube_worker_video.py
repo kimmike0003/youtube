@@ -10,6 +10,7 @@ import math
 import multiprocessing
 import concurrent.futures
 import numpy as np
+import shutil
 from PIL import Image
 
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QRect, QRectF
@@ -170,6 +171,10 @@ class VideoMergerWorker(QThread):
     def process_single_video(self, task):
         img_path, audio_path, output_path, base_name, task_effect_config = task
         
+        # [Fix] 고유 임시 디렉토리 생성 (충돌 방지 및 안전한 삭제)
+        temp_dir = os.path.join(os.path.dirname(output_path), f"temp_{base_name}_{int(time.time())}_{os.getpid()}")
+        os.makedirs(temp_dir, exist_ok=True)
+        
         # 임시 파일 경로들 (정리용)
         temp_files = []
         
@@ -253,8 +258,8 @@ class VideoMergerWorker(QThread):
             
             # 자막 PNG 생성
             if sub_timing_list:
-                temp_dir = os.path.join(os.path.dirname(output_path), "temp_subs")
-                os.makedirs(temp_dir, exist_ok=True)
+                # temp_dir는 상단에서 이미 생성됨
+                pass
                 
                 for idx, (start_t, end_t, text) in enumerate(sub_timing_list):
                     # 표시 시간이 영상 길이보다 길면 무시
@@ -322,7 +327,8 @@ class VideoMergerWorker(QThread):
                 
                 if len(image_checkpoints) > 1:
                     # Create Concat List for Images
-                    image_temp_dir = os.path.join(os.path.dirname(output_path), f"temp_imgs_{base_name}")
+                    # [Fix] Use sub-folder in temp_dir for easier cleanup
+                    image_temp_dir = os.path.join(temp_dir, "imgs")
                     os.makedirs(image_temp_dir, exist_ok=True)
                     
                     processed_imgs = []
@@ -546,16 +552,10 @@ class VideoMergerWorker(QThread):
                 process.kill()
                 raise Exception("FFmpeg Timeout")
 
-            # Cleanup Temp Files
-            for tmp in temp_files:
-                try: os.remove(tmp)
-                except: pass
-            
-            # temp_subs 폴더 삭제
+            # Cleanup Temp Files (Include Directory)
             try:
-                temp_subs_dir = os.path.join(os.path.dirname(output_path), "temp_subs")
-                if os.path.exists(temp_subs_dir):
-                    os.rmdir(temp_subs_dir)
+                if os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir, ignore_errors=True)
             except:
                 pass
             
@@ -565,9 +565,10 @@ class VideoMergerWorker(QThread):
             print(f"Error processing {base_name}: {e}")
             traceback.print_exc()
             # Cleanup on error
-            for tmp in temp_files:
-                try: os.remove(tmp)
-                except: pass
+            try:
+                if os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+            except: pass
             return False
 
     def fix_concat_file_local(self, path):
@@ -837,6 +838,10 @@ class VideoDubbingWorker(VideoMergerWorker):
             self.log_signal.emit(f"🎬 동영상 더빙 작업 시작: {os.path.basename(self.video_path)}...")
             self.log_signal.emit(f"   오디오: {os.path.basename(self.audio_path)}")
             
+            # [Fix] Unique Temp Dir
+            temp_dir = os.path.join(os.path.dirname(self.output_path), f"temp_dub_{int(time.time())}_{os.getpid()}")
+            os.makedirs(temp_dir, exist_ok=True)
+            
             try:
                 import imageio_ffmpeg
                 ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
@@ -961,7 +966,8 @@ class VideoDubbingWorker(VideoMergerWorker):
             TARGET_W, TARGET_H = 1920, 1080 
             
             if sub_timing_list:
-                temp_dir = os.path.join(os.path.dirname(self.output_path), "temp_subs_dub")
+                # Use unique temp_dir
+                pass
                 os.makedirs(temp_dir, exist_ok=True)
                 
                 for idx, (start_t, end_t, text) in enumerate(sub_timing_list):
@@ -1061,11 +1067,9 @@ class VideoDubbingWorker(VideoMergerWorker):
                 return
             
             # Clean up temp subs
-            for path in temp_files:
-                try: os.remove(path)
-                except: pass
             try:
-                 if temp_files: os.rmdir(os.path.dirname(temp_files[0]))
+                if os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir, ignore_errors=True)
             except: pass
 
             elapsed = time.time() - start_time
@@ -1074,6 +1078,11 @@ class VideoDubbingWorker(VideoMergerWorker):
         except Exception as e:
             self.error.emit(f"❌ 오류 발생: {e}")
             traceback.print_exc()
+            # Cleanup
+            try:
+                if 'temp_dir' in locals() and os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+            except: pass
 
 class BatchDubbingWorker(QThread):
     log_signal = pyqtSignal(str)
