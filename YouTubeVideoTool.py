@@ -25,7 +25,7 @@ import urllib.parse
 from datetime import datetime, timedelta
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer, QRect, QRectF
 from PyQt5.QtGui import (QPalette, QColor, QFont, QImage, QPainter, QPen, QBrush, QPixmap, QFontDatabase, QFontInfo, 
-                         QPainterPath, QTextDocument, QAbstractTextDocumentLayout, QLinearGradient, QRadialGradient)
+                         QPainterPath, QTextDocument, QAbstractTextDocumentLayout, QLinearGradient, QRadialGradient, QFontMetrics)
 import threading
 import concurrent.futures
 import multiprocessing
@@ -3506,18 +3506,31 @@ class MainApp(QWidget):
     def initTabGoldPrice(self):
         layout = QVBoxLayout()
         
-        btn_layout = QHBoxLayout()
-        self.btn_fetch_gold = QPushButton("금시세 가져오기")
-        self.btn_fetch_gold.setFixedSize(150, 40)
-        self.btn_fetch_gold.clicked.connect(self.fetch_gold_price)
-        btn_layout.addWidget(self.btn_fetch_gold)
+        # Model Select Layout
+        model_layout = QHBoxLayout()
+        model_layout.addWidget(QLabel("베이스 영상 선택:"))
+        self.combo_gold_model = QComboBox()
+        self.combo_gold_model.setMinimumWidth(300)
+        model_layout.addWidget(self.combo_gold_model)
         
-        self.btn_create_gold_image = QPushButton("이미지 생성")
-        self.btn_create_gold_image.setFixedSize(150, 40)
-        self.btn_create_gold_image.setStyleSheet("background-color: #E61717; color: white; font-weight: bold;")
-        self.btn_create_gold_image.clicked.connect(self.create_gold_image)
-        self.btn_create_gold_image.setEnabled(False) # Data required first
-        btn_layout.addWidget(self.btn_create_gold_image)
+        # Refresh Button for Models
+        btn_refresh_model = QPushButton("🔄")
+        btn_refresh_model.setFixedSize(30, 30)
+        btn_refresh_model.setToolTip("목록 새로고침")
+        btn_refresh_model.clicked.connect(self.load_gold_models)
+        model_layout.addWidget(btn_refresh_model)
+        
+        layout.addLayout(model_layout)
+
+        btn_layout = QHBoxLayout()
+        # Removed individual buttons
+        
+        self.btn_create_gold_video = QPushButton("금시세 생성")
+        self.btn_create_gold_video.setFixedSize(150, 40)
+        self.btn_create_gold_video.setStyleSheet("background-color: #673AB7; color: white; font-weight: bold;")
+        self.btn_create_gold_video.clicked.connect(self.create_gold_video)
+        self.btn_create_gold_video.setEnabled(True) # Always enabled, we'll fetch data if needed
+        btn_layout.addWidget(self.btn_create_gold_video)
         
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
@@ -3529,6 +3542,29 @@ class MainApp(QWidget):
         self.tab_gold_price.setLayout(layout)
         
         self.gold_data = None # Store parsed data here
+        self.last_gold_image_path = None
+        
+        # Load models
+        self.load_gold_models()
+
+    def load_gold_models(self):
+        model_dir = r"D:\youtube\shortz\gold_model"
+        if not os.path.exists(model_dir):
+            try:
+                os.makedirs(model_dir)
+            except:
+                pass
+        
+        self.combo_gold_model.clear()
+        if os.path.exists(model_dir):
+            files = [f for f in os.listdir(model_dir) if f.lower().endswith('.mp4')]
+            if files:
+                self.combo_gold_model.addItems(files)
+                self.combo_gold_model.setCurrentIndex(0)
+            else:
+                self.combo_gold_model.addItem("MP4 파일 없음")
+        else:
+            self.combo_gold_model.addItem("폴더 없음")
 
     def fetch_gold_price(self):
         try:
@@ -3636,296 +3672,336 @@ class MainApp(QWidget):
                     result_text += f"\n⚠️ 국제 시세 조회 실패: {e_spot}\n"
 
                 self.txt_gold_price_result.setText(result_text)
-                self.btn_create_gold_image.setEnabled(True)
+                # self.btn_create_gold_image.setEnabled(True) # Removed
                 self.log_signal.emit("✅ 금시세 데이터를 성공적으로 가져왔습니다.")
+                return True
             else:
                 self.txt_gold_price_result.setText("지정된 요소(<div class='korGold_price'>)를 찾을 수 없습니다.")
                 self.log_signal.emit("⚠️ 금시세 요소를 찾을 수 없습니다.")
+                return False
                 
         except Exception as e:
             self.txt_gold_price_result.setText(f"오류 발생: {e}")
             self.log_signal.emit(f"❌ 금시세 가져오기 실패: {e}")
+            return False
+
+
 
     def create_gold_image(self):
         if not self.gold_data:
-            QMessageBox.warning(self, "데이터 없음", "먼저 금시세를 가져와주세요.")
-            return
+            # QMessageBox.warning(self, "데이터 없음", "먼저 금시세를 가져와주세요.")
+            self.log_signal.emit("⚠️ 금시세 데이터가 없습니다.")
+            return False
             
         try:
-            # Half of 9:16 (1080x1920) -> 1080 x 960
-            W, H = 1080, 960
+            # Full HD Portrait (9:16) - Video Overlay Mode
+            W, H = 1080, 1920
             image = QImage(W, H, QImage.Format_ARGB32)
-            # Dark Background (Deep Grey/Black Gradient)
-            image.fill(QColor("#111111"))
+            # Transparent Background
+            image.fill(Qt.transparent)
             
             painter = QPainter(image)
             try:
                 painter.setRenderHint(QPainter.Antialiasing)
-                
-                # --- Tools ---
-                def draw_glass_rect(rect, radius=20, opacity=50):
-                    # Glass effect: semi-transparent black/white with subtle border
-                    painter.setBrush(QColor(30, 30, 30, 200))
-                    painter.setPen(QPen(QColor(255, 255, 255, 30), 1.5))
-                    painter.drawRoundedRect(rect, radius, radius)
-                    
-                def draw_gold_gradient_text(rect, text, font):
-                    # Create a gradient for text
-                    gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
-                    gradient.setColorAt(0.0, QColor("#FDB931")) # Light Gold
-                    gradient.setColorAt(0.5, QColor("#FDCB5C"))
-                    gradient.setColorAt(1.0, QColor("#D4AF37")) # Metallic Gold
-                    
-                    painter.setPen(QPen(QBrush(gradient), 1))
-                    painter.setFont(font)
-                    painter.drawText(rect, Qt.AlignCenter, text)
-                    
-                def draw_gold_plate_header(rect, text):
-                    # Gold gradient background
-                    gradient = QLinearGradient(rect.topLeft(), rect.bottomLeft())
-                    gradient.setColorAt(0.0, QColor("#C6A355")) # Darker gold top
-                    gradient.setColorAt(0.2, QColor("#F9E292")) # Shine
-                    gradient.setColorAt(0.7, QColor("#C6A355"))
-                    
-                    painter.setBrush(QBrush(gradient))
-                    painter.setPen(Qt.NoPen)
-                    painter.drawRoundedRect(rect, 15, 15)
-                    
-                    # Shine effect
-                    shine_rect = QRectF(rect.x(), rect.y(), rect.width(), rect.height()/2)
-                    painter.setBrush(QColor(255, 255, 255, 40))
-                    painter.drawRoundedRect(shine_rect, 15, 15)
-                    
-                    # Text
-                    painter.setPen(QColor("#3E2C09")) # Dark Brown for contrast on gold
-                    font = QFont("Malgun Gothic", 28, QFont.Bold) # Reduced from 32
-                    font.setLetterSpacing(QFont.AbsoluteSpacing, 2)
-                    painter.setFont(font)
-                    painter.drawText(rect, Qt.AlignCenter, text)
+                painter.setRenderHint(QPainter.TextAntialiasing)
 
-                # --- Background Ambiance ---
-                # Subtle spotlight center
-                bg_gradient = QRadialGradient(W/2, H/2, W/1.5)
-                bg_gradient.setColorAt(0.0, QColor("#2a2a2a"))
-                bg_gradient.setColorAt(1.0, QColor("#050505"))
-                painter.fillRect(0, 0, W, H, bg_gradient)
+                # --- Layout Config ---
+                # Top Bar: Title + Date + Intl
+                top_bg_h = 280 
                 
-                # --- Main Container ---
-                # Width 1000 (margins 40 side), Height 900 (margins 30 top/bot)
-                container_w, container_h = 1000, 900
-                cx, cy = (W - container_w)//2, (H - container_h)//2
-                container_rect = QRect(cx, cy, container_w, container_h)
+                # Bottom Panel: Prices
+                # --- 2. Bottom Content: Domestic Table ---
+                # Calculate required height and position at very bottom
                 
-                # Outer Glow/Border
-                painter.setBrush(QColor(20, 20, 20, 180))
-                painter.setPen(QPen(QColor("#C6A355"), 2)) # Gold Border
-                painter.drawRoundedRect(container_rect, 30, 30)
+                # Height Calc
+                # Header (55) + Gap(5) + 5 Rows * (RowH(70) + Gap(2)) + BottomPadding(20)
+                # 60 + 5 * 72 + 20 = 80 + 360 = 440 approx
+                
+                rows_count = len(self.gold_data['rows'])
+                header_h = 55
+                row_h = 70
+                gap = 2
+                bottom_padding = 30
+                
+                total_table_h = header_h + 5 + (rows_count * (row_h + gap)) + bottom_padding
+                
+                # New Start Y
+                bottom_bg_start = H - total_table_h
+                bottom_bg_h = total_table_h
+                
+                # Draw Bottom Background Here (override previous if needed, or just draw new)
+                # We need to clear previous bottom rect? No, just draw over or relying on previous fill?
+                # Actually, in previous code we drew rect at 'bottom_bg_start' which was fixed 1250.
+                # Let's redraw the black rect at correct new position.
+                
+                # Background Colors
+                bg_color = QColor(0, 0, 0, 150) # More transparent
 
-                # --- Header Content ---
-                # Main Title: "국내 금시세"
-                title_rect = QRect(cx, cy + 25, container_w, 70)
-                title_font = QFont("Malgun Gothic", 36, QFont.Bold) # Reduced from 42
+                # Draw Top Background 
+                painter.setBrush(bg_color)
+                painter.setPen(Qt.NoPen)
+                painter.drawRect(0, 0, W, top_bg_h)
                 
-                # Draw title with glowing effect manually for emphasis
-                painter.setPen(QPen(QColor("#FDB931"), 2))
-                painter.setFont(title_font)
-                painter.drawText(title_rect, Qt.AlignCenter, "국내 금시세")
-                
-                # Timestamp (Top Right)
+                # --- 1. Top Content ---
+                # Line 1: "오늘의 금시세"
+                painter.setFont(QFont("Malgun Gothic", 50, QFont.Bold)) # Increased from 40
+                painter.setPen(QColor("#FDB931")) # Gold
+                painter.drawText(QRect(0, 20, W, 80), Qt.AlignCenter, "오늘의 금시세")
+
+                # Line 2: Date + Time "2026/01/18 20:20 기준"
+                date_str = self.gold_data['date'] 
+                time_str = ""
                 if 'international' in self.gold_data:
-                    timestamp = self.gold_data['international'].get('time', '')
-                    if timestamp:
-                        painter.setFont(QFont("Malgun Gothic", 14, QFont.Bold)) # Reduced from 16
-                        painter.setPen(QColor("#DDDDDD"))
-                        # Shift left a bit more to fit
-                        time_rect = QRect(cx + container_w - 320, cy + 30, 300, 40)
-                        painter.drawText(time_rect, Qt.AlignRight | Qt.AlignVCenter, f"{timestamp} 기준")
-                
-                # Date Header (Shifted down)
-                header_h = 70 # Reduced from 80
-                header_rect = QRect(cx + 50, cy + 100, container_w - 100, header_h)
-                # Use data date
-                date_str = self.gold_data['date'] # e.g. 2024-10-27
-                # Format nicely if possible. "2024년 10월 27일" format
+                    intl_t = self.gold_data['international'].get('time', '')
+                    if ' ' in intl_t:
+                         time_str = intl_t.split(' ')[1]
+                if not time_str:
+                    time_str = datetime.now().strftime("%H:%M")
+
                 try:
                     dt = datetime.strptime(date_str, "%Y-%m-%d")
-                    date_display = dt.strftime("%Y년 %m월 %d일")
+                    date_display = dt.strftime("%Y/%m/%d")
                 except:
                     date_display = date_str
                 
-                draw_gold_plate_header(header_rect, date_display)
+                full_date_str = f"{date_display} {time_str} 기준"
                 
-                # --- Table Data ---
-                table_y = cy + 190
-                
-                # Column Headers
-                # Width 1000 -> [Name 280] [Sell 340] [Buy 340] Use gaps 10
-                # Offsets: cx+20, cx+310, cx+660
-                
-                col1_x = cx + 20
-                col2_x = cx + 310
-                col3_x = cx + 660
-                col_w_name = 280
-                col_w_price = 330 # slightly less than 340
-                
-                # Draw Column Headers "판매", "매입"
-                painter.setPen(QColor("#AAAAAA"))
-                font_col_header = QFont("Malgun Gothic", 18) # Reduced from 20
-                
-                # Center of Col2 area
-                rect_h_sell = QRect(col2_x, table_y, col_w_price, 35)
-                painter.setFont(font_col_header)
-                painter.drawText(rect_h_sell, Qt.AlignCenter, "판 매") # User Buy (High Price)
-                
-                rect_h_buy = QRect(col3_x, table_y, col_w_price, 35)
-                painter.drawText(rect_h_buy, Qt.AlignCenter, "매 입") # User Sell (Low Price)
-                
-                current_y = table_y + 50
-                row_h = 85 # Reduced from 95
-                gap = 12
-                
-                font_row_name = QFont("Malgun Gothic", 22, QFont.Bold) # Reduced from 26
-                font_price = QFont("Malgun Gothic", 26, QFont.Bold)   # Reduced from 32
-                
-                for row in self.gold_data['rows']:
-                    # Row Rects
-                    rect_name = QRect(col1_x, current_y, col_w_name, row_h)
-                    rect_sell = QRect(col2_x, current_y, col_w_price, row_h) # Col 2
-                    rect_buy = QRect(col3_x, current_y, col_w_price, row_h)  # Col 3
-                    
-                    # Glass Backgrounds per cell
-                    draw_glass_rect(rect_name, 12)
-                    draw_glass_rect(rect_sell, 12)
-                    draw_glass_rect(rect_buy, 12)
-                    
-                    # 1. Name & Icon
-                    # Draw Icon Placeholder (Gold Bar/Coin)
-                    icon_rect = QRect(rect_name.x() + 20, rect_name.y() + 15, 50, 50)
-                    
-                    # Simple Icon Drawing based on name
-                    name = row['name']
-                    painter.setPen(Qt.NoPen)
-                    if "순금" in name:
-                        # Gold Bar
-                        gradient = QLinearGradient(icon_rect.topLeft(), icon_rect.bottomLeft())
-                        gradient.setColorAt(0, QColor("#FFD700"))
-                        gradient.setColorAt(1, QColor("#B8860B"))
-                        painter.setBrush(gradient)
-                        # Trapezoid shape for bar
-                        path = QPainterPath()
-                        path.moveTo(icon_rect.x()+10, icon_rect.y()+10)
-                        path.lineTo(icon_rect.x()+40, icon_rect.y()+10)
-                        path.lineTo(icon_rect.x()+50, icon_rect.y()+40)
-                        path.lineTo(icon_rect.x(), icon_rect.y()+40)
-                        path.closeSubpath()
-                        painter.drawPath(path)
-                    elif "18k" in name or "14k" in name:
-                        # Coin
-                        gradient = QLinearGradient(icon_rect.topLeft(), icon_rect.bottomRight())
-                        gradient.setColorAt(0, QColor("#FDCB5C"))
-                        gradient.setColorAt(1, QColor("#C6A355"))
-                        painter.setBrush(gradient)
-                        painter.drawEllipse(icon_rect.adjusted(5,5,-5,-5))
-                        painter.setBrush(Qt.NoBrush)
-                        painter.setPen(QPen(QColor("#B8860B"), 2))
-                        painter.drawEllipse(icon_rect.adjusted(10,10,-10,-10))
-                    elif "은" in name or "백금" in name:
-                        # Silver Bar/Coin
-                        gradient = QLinearGradient(icon_rect.topLeft(), icon_rect.bottomLeft())
-                        gradient.setColorAt(0, QColor("#E0E0E0"))
-                        gradient.setColorAt(1, QColor("#909090"))
-                        painter.setBrush(gradient)
-                        painter.setPen(Qt.NoPen)
-                        if "백금" in name: # Bar
-                            painter.drawRoundedRect(icon_rect.adjusted(5,15,-5,-15), 5, 5)
-                        else: # Coin
-                            painter.drawEllipse(icon_rect.adjusted(8,8,-8,-8))
-                    
-                    # Name Text
-                    painter.setPen(QColor("#E0E0E0"))
-                    painter.setFont(font_row_name)
-                    # Shift text right after icon
-                    name_text_rect = rect_name.adjusted(80, 0, 0, 0)
-                    
-                    display_name = name
-                    if "돈" not in display_name:
-                        display_name += " 1돈"
-                        
-                    painter.drawText(name_text_rect, Qt.AlignLeft | Qt.AlignVCenter, display_name)
-                    
-                    # 2. Prices
-                    # Mapping Reminder:
-                    # Table "판매" (Sale) = User Buys = `price_buy` data
-                    # Table "매입" (Purchase) = User Sells = `price_sell` data
-                    
-                    # Helper to draw price
-                    def draw_price_cell(rect, price):
-                        if price == "제품시세 적용":
-                            painter.setPen(QColor("#CCCCCC"))
-                            painter.setFont(QFont("Malgun Gothic", 18, QFont.Bold)) # Smaller
-                            painter.drawText(rect, Qt.AlignCenter, price)
-                            return
-                        
-                        # Gold Text Color
-                        painter.setPen(QColor("#FDD017")) # Goldish Yellow
-                        painter.setFont(font_price)
-                        
-                        # Align Center
-                        # Add "원" smaller
-                        full_text = f"{price}"
-                        # Just draw simple text for now to match look
-                        painter.drawText(rect, Qt.AlignCenter, full_text + " 원")
+                painter.setFont(QFont("Malgun Gothic", 34, QFont.Bold)) # Increased from 28
+                painter.setPen(QColor("#DDDDDD"))
+                painter.drawText(QRect(0, 110, W, 50), Qt.AlignCenter, full_date_str)
 
-                    draw_price_cell(rect_sell, row['buy_price']) # Swapped to match "Sale"
-                    draw_price_cell(rect_buy, row['sell_price']) # Swapped to match "Purchase"
-                    
-                    current_y += row_h + gap
-
-                # --- Draw International Section ---
+                # Line 3: International Spot Prices
                 if 'international' in self.gold_data:
                     intl = self.gold_data['international']
                     if intl['gold'] != '-':
-                        # Separator Line or just space? 
-                        # We have space.
+                        # Split: "국제시세" (White), "Gold $..." (Yellow), "Silver $..." (White)
                         
-                        # Int'l Container
-                        intl_rect = QRect(cx + 50, current_y + 10, container_w - 100, 80)
+                        font_label = QFont("Malgun Gothic", 30, QFont.Bold) # Increased from 26
+                        painter.setFont(font_label)
+                        fm = QFontMetrics(font_label)
                         
-                        # Glass background for Intl
-                        draw_glass_rect(intl_rect, 15)
+                        txt_label = "국제시세  "
+                        txt_gold = f"Gold ${intl['gold']}/oz  "
+                        txt_silver = f"Silver ${intl['silver']}/oz"
                         
-                        # "국제 금시세 (Spot)" Header + Time
-                        # Header
-                        painter.setFont(QFont("Malgun Gothic", 16, QFont.Bold))
-                        painter.setPen(QColor("#AAAAAA"))
-                        label_rect = QRect(intl_rect.x() + 20, intl_rect.y(), 200, 80)
-                        painter.drawText(label_rect, Qt.AlignLeft | Qt.AlignVCenter, "국제 시세 (Spot)")
+                        w_label = fm.width(txt_label)
+                        w_gold = fm.width(txt_gold)
+                        w_silver = fm.width(txt_silver)
                         
-                        # Values
-                        # Gold
-                        painter.setFont(QFont("Malgun Gothic", 22, QFont.Bold))
-                        painter.setPen(QColor("#FDD017"))
-                        gold_rect = QRect(intl_rect.x() + 220, intl_rect.y(), 300, 80)
-                        painter.drawText(gold_rect, Qt.AlignLeft | Qt.AlignVCenter, f"Gold  ${intl['gold']} /oz")
+                        # Center block
+                        total_w = w_label + w_gold + w_silver
+                        start_x = (W - total_w) // 2
                         
-                        # Silver
-                        painter.setPen(QColor("#E0E0E0"))
-                        silver_rect = QRect(intl_rect.x() + 540, intl_rect.y(), 300, 80)
-                        painter.drawText(silver_rect, Qt.AlignLeft | Qt.AlignVCenter, f"Silver  ${intl['silver']} /oz")
+                        y_pos = 180 # Slightly lower to accommodate larger text above
+                        h_height = 60
+                        
+                        # 1. Label
+                        painter.setPen(QColor("#FFFFFF"))
+                        painter.drawText(QRect(start_x, y_pos, w_label, h_height), Qt.AlignLeft|Qt.AlignVCenter, txt_label)
+                        
+                        # 2. Gold
+                        painter.setPen(QColor("#FDB931")) # Yellow/Gold
+                        painter.drawText(QRect(start_x + w_label, y_pos, w_gold, h_height), Qt.AlignLeft|Qt.AlignVCenter, txt_gold)
+                        
+                        # 3. Silver
+                        painter.setPen(QColor("#FFFFFF"))
+                        painter.drawText(QRect(start_x + w_label + w_gold, y_pos, w_silver, h_height), Qt.AlignLeft|Qt.AlignVCenter, txt_silver)
+
+                # Draw Bottom Background Here
+                painter.setBrush(bg_color)
+                painter.setPen(Qt.NoPen)
+                painter.drawRect(0, bottom_bg_start, W, bottom_bg_h)
+                
+                # --- Helper ---
+                def draw_glass_rect(rect, radius=15):
+                    painter.setBrush(QColor(40, 40, 40, 130)) # More transparent
+                    painter.setPen(QPen(QColor(100, 100, 100, 50), 1))
+                    painter.drawRoundedRect(rect, radius, radius)
+                
+                curr_y = bottom_bg_start + 15 # Top padding inside box
+                
+                # Column Config
+                mx = 40
+                grid_w = W - (mx * 2)
+                col1_w = int(grid_w * 0.25)
+                col2_w = int(grid_w * 0.375)
+                col3_w = int(grid_w * 0.375)
+                
+                col1_x = mx
+                col2_x = mx + col1_w
+                col3_x = mx + col1_w + col2_w
+                
+                # A. Table Headers
+                # Rects
+                h_name = QRect(col1_x, curr_y, col1_w, header_h)
+                h_sell = QRect(col2_x, curr_y, col2_w, header_h)
+                h_buy  = QRect(col3_x, curr_y, col3_w, header_h)
+                
+                draw_glass_rect(h_name, 10)
+                draw_glass_rect(h_sell, 10)
+                draw_glass_rect(h_buy, 10)
+                
+                # Text
+                painter.setFont(QFont("Malgun Gothic", 24, QFont.Bold)) # Slightly smaller
+                painter.setPen(QColor("#DDDDDD")) 
+                
+                painter.drawText(h_name, Qt.AlignCenter, "품목")
+                painter.drawText(h_sell, Qt.AlignCenter, "파실때") 
+                painter.drawText(h_buy, Qt.AlignCenter, "사실때") 
+                
+                curr_y += header_h + 5 # Gap
+                
+                # B. Data Rows
+                font_name = QFont("Malgun Gothic", 26, QFont.Bold)
+                font_price = QFont("Malgun Gothic", 30, QFont.Bold)
+                
+                for row in self.gold_data['rows']:
+                    # Rects
+                    r_name = QRect(col1_x, curr_y, col1_w, row_h)
+                    r_sell = QRect(col2_x, curr_y, col2_w, row_h)
+                    r_buy  = QRect(col3_x, curr_y, col3_w, row_h)
+                    
+                    # Bg
+                    draw_glass_rect(r_name, 10)
+                    draw_glass_rect(r_sell, 10)
+                    draw_glass_rect(r_buy, 10)
+                    
+                    # Name
+                    painter.setFont(font_name)
+                    painter.setPen(QColor("#E0E0E0"))
+                    
+                    name = row['name']
+                    if "돈" not in name: name += "(1돈)"
+                    painter.drawText(r_name, Qt.AlignCenter, name)
+                    
+                    # Prices
+                    painter.setFont(font_price)
+                    
+                    # Middle (User Sells / Shop Buys) -> Header "파실때"
+                    painter.setPen(QColor("#FFFFFF"))
+                    painter.drawText(r_sell, Qt.AlignCenter, f"{row['sell_price']}") # Corrected to sell_price
+                    
+                    # Right (User Buys / Shop Sells) -> Header "사실때"
+                    painter.setPen(QColor("#FDD017")) 
+                    painter.drawText(r_buy, Qt.AlignCenter, f"{row['buy_price']}") # Corrected to buy_price
+                    
+                    curr_y += row_h + gap
+                    
             finally:
                 painter.end()
+                    
+
             
             # Save
-            filename = f"gold_price_premium_{self.gold_data['date']}.png"
+            filename = "gold_price_premium.png"
             path = os.path.join(os.getcwd(), filename)
             image.save(path)
+            self.last_gold_image_path = path
+
+            # Enable video creation
+            # self.btn_create_gold_video.setEnabled(True) # Removed
             
-            QMessageBox.information(self, "완료", f"프리미엄 이미지가 생성되었습니다:\n{path}")
-            os.startfile(path)
+            # QMessageBox.information(self, "완료", f"이미지가 재생성되었습니다 (높이 축소형):\n{path}")
+            # os.startfile(path) # Don't open automatically in batch mode
+            self.log_signal.emit(f"✅ 이미지 생성 완료: {path}")
+            return True
             
         except Exception as e:
-            QMessageBox.critical(self, "이미지 생성 실패", f"오류: {e}")
-            self.log_signal.emit(f"이미지 생성 오류: {e}")
+            # QMessageBox.critical(self, "이미지 생성 실패", f"오류: {e}")
+            self.log_signal.emit(f"❌ 이미지 생성 오류: {e}")
+            return False
+
+    def create_gold_video(self):
+        # 1. Fetch Data
+        if not self.fetch_gold_price():
+            QMessageBox.critical(self, "오류", "금시세 데이터를 가져오는데 실패했습니다.")
+            return
+            
+        # 2. Create Image
+        if not self.create_gold_image():
+            QMessageBox.critical(self, "오류", "이미지 생성에 실패했습니다.")
+            # self.log_signal.emit("❌ 이미지 생성 실패")
+            return
+
+        if not self.last_gold_image_path or not os.path.exists(self.last_gold_image_path):
+            QMessageBox.warning(self, "오류", "생성된 이미지를 찾을 수 없습니다.")
+            return
+
+        # 1. Base Video from Combo
+        selected_model = self.combo_gold_model.currentText()
+        if not selected_model or selected_model in ["MP4 파일 없음", "폴더 없음"]:
+            QMessageBox.warning(self, "오류", "베이스 영상이 선택되지 않았습니다.")
+            return
+            
+        base_video_path = os.path.join(r"D:\youtube\shortz\gold_model", selected_model)
+        if not os.path.exists(base_video_path):
+            QMessageBox.warning(self, "오류", f"베이스 영상 파일이 없습니다:\n{base_video_path}")
+            return
+
+        output_dir = r"D:\youtube\shortz"
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+        timestamp = datetime.now().strftime("%Y%m%d%H%M")
+        output_filename = f"gold_market_price_{timestamp}.mp4"
+        output_path = os.path.join(output_dir, output_filename)
+
+        # FFmpeg Command
+        # Overlay image at bottom (0:H-h)
+        # Inputs: 0: video, 1: image
+        # If image is 1080x960 and video is 1080x1920:
+        # overlay=0:960
+        # Wait, user said "하단 기준으로 이미지가 올라가게 한다". 
+        # If image is shorter than half, it should be at bottom? The image creates is 1080x960 (solid). 
+        # Ideally: overlay=0:H-h
+        
+        ffmpeg_exe = os.path.join(os.getcwd(), "ffmpeg_bin", "ffmpeg.exe")
+        if not os.path.exists(ffmpeg_exe):
+            # Fallback to system ffmpeg if local not found, though unlikely given the error
+            ffmpeg_exe = "ffmpeg"
+
+        cmd = [
+            ffmpeg_exe, "-y",
+            "-i", base_video_path,
+            "-i", self.last_gold_image_path,
+            "-filter_complex", "[0:v][1:v]overlay=0:H-h[outv]",
+            "-map", "[outv]",
+            "-map", "0:a?", # Map audio if exists in base video, ? makes it optional
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "23",
+            "-c:a", "copy",
+            output_path
+        ]
+
+        self.log_signal.emit(f"🎬 영상 생성 시작: {output_path}")
+        self.txt_gold_price_result.append(f"\n🎬 영상 생성 중...\n{output_path}")
+        
+        # Use a thread or process to prevent UI freeze? For now, run synchronously or use QProcess is better, 
+        # but to keep it simple and given I have to impl logic here:
+        # Subprocess run is blocking. If video is short, it's okay. model_v1.mp4 length unknown.
+        # Assuming it's short (Shorts).
+        
+        try:
+            # Creation flags for hiding console window on Windows
+            creation_flags = 0x08000000 if os.name == 'nt' else 0
+            
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=creation_flags)
+            
+            self.log_signal.emit(f"✅ 영상 생성 완료: {output_path}")
+            self.txt_gold_price_result.append(f"✅ 생성 완료!")
+            
+            QMessageBox.information(self, "완료", f"영상이 생성되었습니다:\n{output_path}")
+            # Open folder
+            os.startfile(output_dir)
+            
+        except subprocess.CalledProcessError as e:
+            err_msg = e.stderr.decode('utf-8', errors='ignore') if e.stderr else str(e)
+            self.log_signal.emit(f"❌ FFmpeg 오류: {err_msg}")
+            QMessageBox.critical(self, "인코딩 오류", f"FFmpeg 오류가 발생했습니다.\n{err_msg[-500:]}")
+        except Exception as e:
+            self.log_signal.emit(f"❌ 오류: {e}")
+            QMessageBox.critical(self, "오류", f"작업 중 오류 발생: {e}")
 
 
 class BatchVideoEffectWorker(VideoMergerWorker):
