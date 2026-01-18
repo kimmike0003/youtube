@@ -17,14 +17,15 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QTextEdit,
                              QPushButton, QLabel, QFileDialog, QHBoxLayout, 
                              QTabWidget, QComboBox, QSlider, QSpinBox, QGroupBox, QDoubleSpinBox, 
                              QFormLayout, QLineEdit, QGridLayout, QCheckBox, QMessageBox,
-                             QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QStackedWidget)
+                             QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QStackedWidget,
+                             QSizePolicy)
 import json
 import urllib.request
 import urllib.parse
 from datetime import datetime, timedelta
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer, QRect, QRectF
 from PyQt5.QtGui import (QPalette, QColor, QFont, QImage, QPainter, QPen, QBrush, QPixmap, QFontDatabase, QFontInfo, 
-                         QPainterPath, QTextDocument, QAbstractTextDocumentLayout)
+                         QPainterPath, QTextDocument, QAbstractTextDocumentLayout, QLinearGradient, QRadialGradient)
 import threading
 import concurrent.futures
 import multiprocessing
@@ -177,7 +178,7 @@ class MainApp(QWidget):
         # 5. Video Dubbing
         self.tab6 = QWidget()
         self.initTab6()
-        self.tabs.addTab(self.tab6, "영상+자막")
+        self.tabs.addTab(self.tab6, "동영상+자막")
 
         # 6. Video Effects
         self.tab5 = QWidget()
@@ -210,6 +211,21 @@ class MainApp(QWidget):
         self.tab_ftp = QWidget()
         self.initTabFTP()
         self.tabs.addTab(self.tab_ftp, "FTP Upload")
+
+        # 12. Video List
+        self.tab_video_list = QWidget()
+        self.initTabVideoList()
+        self.tabs.addTab(self.tab_video_list, "영상목록")
+
+        # 13. Prompt
+        self.tab_prompt = QWidget()
+        self.initTabPrompt()
+        self.tabs.addTab(self.tab_prompt, "프롬프트")
+
+        # 14. Gold Price Shorts
+        self.tab_gold_price = QWidget()
+        self.initTabGoldPrice()
+        self.tabs.addTab(self.tab_gold_price, "금시세숏츠")
 
 
 
@@ -478,11 +494,29 @@ class MainApp(QWidget):
         settings_group.setLayout(form_layout)
         layout.addWidget(settings_group)
 
+        # 버튼 레이아웃
+        btn_layout = QHBoxLayout()
+
         # 생성 버튼
         self.btn_generate_tts = QPushButton("🔊 오디오 생성 (Generate Audio)")
-        self.btn_generate_tts.setStyleSheet("height: 50px; font-weight: bold; background-color: #28a745; color: white; border-radius: 10px;")
+        self.btn_generate_tts.setStyleSheet("""
+            QPushButton { height: 50px; font-weight: bold; background-color: #28a745; color: white; border-radius: 10px; }
+            QPushButton:disabled { background-color: #6c757d; }
+        """)
         self.btn_generate_tts.clicked.connect(self.generate_audio)
-        layout.addWidget(self.btn_generate_tts)
+        
+        # 중지 버튼
+        self.btn_stop_tts = QPushButton("🛑 중지 (Stop)")
+        self.btn_stop_tts.setStyleSheet("""
+            QPushButton { height: 50px; font-weight: bold; background-color: #dc3545; color: white; border-radius: 10px; }
+            QPushButton:disabled { background-color: #6c757d; }
+        """)
+        self.btn_stop_tts.setEnabled(False)
+        self.btn_stop_tts.clicked.connect(self.stop_tts)
+
+        btn_layout.addWidget(self.btn_generate_tts)
+        btn_layout.addWidget(self.btn_stop_tts)
+        layout.addLayout(btn_layout)
 
         # 텍스트 입력
         layout.addWidget(QLabel("입력 텍스트:"))
@@ -1239,7 +1273,7 @@ class MainApp(QWidget):
         
         # 3. 필터링 (사용자 요청: Gmarket, Nanum, Malgun)
         # 디렉토리에서 로드된 폰트는 무조건 포함
-        target_keywords = ["Gmarket", "Nanum", "Malgun"]
+        target_keywords = ["Gmarket", "Nanum", "Malgun", "BIZ", "Hannari", "Noto"]
         
         matched_families = set(loaded_families) # 로드된 폰트 우선 포함
         
@@ -1325,7 +1359,13 @@ class MainApp(QWidget):
             self.tts_client.set_api_key(api_key)
             self.tts_log.append(f"ℹ️ API Key 변경됨: {self.combo_apikey.currentText()}")
 
+    def stop_tts(self):
+        self.stop_tts_flag = True
+        self.tts_log.append("🛑 작업 중지 요청됨...")
+        self.btn_stop_tts.setEnabled(False)
+
     def generate_audio(self):
+        self.stop_tts_flag = False
         text = self.tts_input.toPlainText().strip()
         if not text:
             self.tts_log.append("❌ 텍스트를 입력하세요.")
@@ -1356,6 +1396,7 @@ class MainApp(QWidget):
             tasks.append((text, None, [{"original": text, "tts": text}]))
 
         self.btn_generate_tts.setEnabled(False)
+        self.btn_stop_tts.setEnabled(True)
         self.tts_log.append("⏳ 생성 시작...")
 
         # 스레드로 실행 (tasks 리스트 전달)
@@ -1366,6 +1407,9 @@ class MainApp(QWidget):
         success_count = 0
         try:
             for task in tasks:
+                if self.stop_tts_flag:
+                    self.log_signal.emit("🛑 사용자에 의해 작업이 중지되었습니다.")
+                    break
                 # task 구조: (combined_text, filename, sub_segments)
                 text_chunk = task[0]
                 filename = task[1]
@@ -1432,6 +1476,8 @@ class MainApp(QWidget):
             
     def set_btn_enable(self, enabled):
         self.btn_generate_tts.setEnabled(enabled)
+        if enabled:
+            self.btn_stop_tts.setEnabled(False)
 
     def browse_image_path(self):
         path = QFileDialog.getExistingDirectory(self, "이미지 저장 폴더 선택")
@@ -2573,6 +2619,1315 @@ class MainApp(QWidget):
         self.btn_at_transcribe.setEnabled(True)
         self.btn_at_all.setEnabled(True)
 
+    def copy_to_clipboard(self, widget):
+        text = ""
+        if isinstance(widget, QTextEdit):
+            text = widget.toPlainText()
+        elif isinstance(widget, QLineEdit):
+            text = widget.text()
+        
+        if text:
+            clipboard = QApplication.clipboard()
+            clipboard.setText(text)
+            self.log_signal.emit("📋 클립보드에 복사되었습니다.")
+
+    def initTabVideoList(self):
+        # Main Layout using StackedWidget for page navigation (List <-> Form)
+        self.video_list_layout = QVBoxLayout()
+        self.video_list_stack = QStackedWidget()
+        
+        # === Page 1: List View ===
+        self.page_list = QWidget()
+        list_layout = QVBoxLayout()
+        
+        # Header
+        list_layout.addWidget(QLabel("📋 영상 데이터 목록 (Video Board)"))
+        
+        # Controls
+        btn_layout = QHBoxLayout()
+        
+        self.btn_new_video = QPushButton("➕ 신규 등록 (New)")
+        self.btn_new_video.setFixedWidth(150)
+        self.btn_new_video.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
+        self.btn_new_video.clicked.connect(lambda: self.switch_to_form_view(None))
+        
+        btn_layout.addStretch()
+        btn_layout.addWidget(self.btn_new_video)
+        list_layout.addLayout(btn_layout)
+        
+        # Table
+        self.video_table = QTableWidget()
+        self.video_table.setColumnCount(9)
+        self.video_table.setHorizontalHeaderLabels([
+            "ID", "채널", "제목", "대본", "이미지스크립트", 
+            "TTS", "설명", "사용여부", "생성일자"
+        ])
+        self.video_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.video_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.video_table.cellDoubleClicked.connect(self.on_video_table_double_click)
+        
+        # Table Header Styling
+        header = self.video_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setSectionResizeMode(2, QHeaderView.Stretch) # Title is now col 2 
+        
+        self.video_table.setStyleSheet("""
+            QTableWidget {
+                background-color: #2b2b2b; color: #d4d4d4; gridline-color: #444;
+            }
+            QHeaderView::section {
+                background-color: #333333; color: #ffffff; padding: 4px; border: 1px solid #444;
+            }
+        """)
+        list_layout.addWidget(self.video_table)
+        
+        # Pagination Controls
+        pagination_layout = QHBoxLayout()
+        pagination_layout.addStretch()
+        
+        self.btn_prev_page = QPushButton("◀ 이전")
+        self.btn_prev_page.setFixedSize(80, 30)
+        self.btn_prev_page.clicked.connect(lambda: self.change_page(-1))
+        
+        self.lbl_page_info = QLabel("1 / 1")
+        self.lbl_page_info.setStyleSheet("color: white; font-weight: bold; margin: 0 10px;")
+        self.lbl_page_info.setAlignment(Qt.AlignCenter)
+        
+        self.btn_next_page = QPushButton("다음 ▶")
+        self.btn_next_page.setFixedSize(80, 30)
+        self.btn_next_page.clicked.connect(lambda: self.change_page(1))
+        
+        pagination_layout.addWidget(self.btn_prev_page)
+        pagination_layout.addWidget(self.lbl_page_info)
+        pagination_layout.addWidget(self.btn_next_page)
+        pagination_layout.addStretch()
+        
+        list_layout.addLayout(pagination_layout)
+        
+        self.page_list.setLayout(list_layout)
+        
+        # === Page 2: Form View (Create / Edit) ===
+        self.page_form = QWidget()
+        form_wrapper = QVBoxLayout()
+        
+        form_group = QGroupBox("영상 데이터 입력/수정")
+        input_layout = QGridLayout()
+        
+        # Channel Selection
+        self.combo_channel = QComboBox()
+        
+        self.input_title = QLineEdit()
+        self.input_title.setPlaceholderText("제목 (Title)")
+        
+        self.input_script = QTextEdit()
+        self.input_script.setPlaceholderText("대본 (Script)")
+        self.input_script.setMinimumHeight(100)
+        
+        self.input_img_script = QTextEdit()
+        self.input_img_script.setPlaceholderText("이미지 스크립트 (Image Script)")
+        self.input_img_script.setMinimumHeight(100)
+        
+        self.input_tts_text = QTextEdit()
+        self.input_tts_text.setPlaceholderText("TTS 텍스트 (TTS Text)")
+        self.input_tts_text.setMinimumHeight(100)
+        
+        self.input_description = QTextEdit()
+        self.input_description.setPlaceholderText("설명 (Description)")
+        self.input_description.setMinimumHeight(100)
+
+        # Fields Layout
+        input_layout.addWidget(QLabel("채널:"), 0, 0)
+        input_layout.addWidget(self.combo_channel, 0, 1)
+
+        input_layout.addWidget(QLabel("제목:"), 1, 0)
+        input_layout.addWidget(self.input_title, 1, 1)
+        
+        input_layout.addWidget(QLabel("대본:"), 2, 0, Qt.AlignTop)
+        input_layout.addWidget(self.input_script, 2, 1)
+        
+        input_layout.addWidget(QLabel("이미지 스크립트:"), 3, 0, Qt.AlignTop)
+        input_layout.addWidget(self.input_img_script, 3, 1)
+        
+        input_layout.addWidget(QLabel("TTS 텍스트:"), 4, 0, Qt.AlignTop)
+        input_layout.addWidget(self.input_tts_text, 4, 1)
+
+        input_layout.addWidget(QLabel("설명:"), 5, 0, Qt.AlignTop)
+        input_layout.addWidget(self.input_description, 5, 1)
+        
+        form_group.setLayout(input_layout)
+        form_wrapper.addWidget(form_group)
+        
+        # Form Buttons
+        btn_form_layout = QHBoxLayout()
+        
+        # Copy Buttons
+        btn_copy_script = QPushButton("Script Copy")
+        btn_copy_script.setFixedSize(120, 30)
+        btn_copy_script.clicked.connect(lambda: self.copy_to_clipboard(self.input_script))
+        btn_form_layout.addWidget(btn_copy_script)
+
+        btn_copy_img = QPushButton("Image Copy")
+        btn_copy_img.setFixedSize(120, 30)
+        btn_copy_img.clicked.connect(lambda: self.copy_to_clipboard(self.input_img_script))
+        btn_form_layout.addWidget(btn_copy_img)
+        
+        btn_copy_tts = QPushButton("TTS Copy")
+        btn_copy_tts.setFixedSize(120, 30)
+        btn_copy_tts.clicked.connect(lambda: self.copy_to_clipboard(self.input_tts_text))
+        btn_form_layout.addWidget(btn_copy_tts)
+        
+        btn_copy_desc = QPushButton("Desc Copy")
+        btn_copy_desc.setFixedSize(120, 30)
+        btn_copy_desc.clicked.connect(lambda: self.copy_to_clipboard(self.input_description))
+        btn_form_layout.addWidget(btn_copy_desc)
+
+        btn_form_layout.addStretch() # Right alignment
+        
+        self.btn_cancel_form = QPushButton("목록")
+        self.btn_cancel_form.setFixedSize(120, 30)
+        self.btn_cancel_form.clicked.connect(self.show_list_view)
+        
+        self.btn_save_video = QPushButton("저장")
+        self.btn_save_video.setFixedSize(120, 30)
+        self.btn_save_video.setStyleSheet("font-weight: bold; background-color: #007bff; color: white; border-radius: 5px;")
+        self.btn_save_video.clicked.connect(self.save_video_data)
+        
+        btn_form_layout.addWidget(self.btn_cancel_form)
+        btn_form_layout.addWidget(self.btn_save_video)
+        
+        form_wrapper.addLayout(btn_form_layout)
+        self.page_form.setLayout(form_wrapper)
+        
+        # Add pages to stack
+        self.video_list_stack.addWidget(self.page_list) # Index 0
+        self.video_list_stack.addWidget(self.page_form) # Index 1
+        
+        self.video_list_layout.addWidget(self.video_list_stack)
+        self.tab_video_list.setLayout(self.video_list_layout)
+        
+        # State
+        self.current_video_id = None
+        self.current_page = 1
+        self.items_per_page = 15
+        self.total_pages = 1
+        
+        # Init Load
+        QTimer.singleShot(1000, self.load_video_list)
+
+    def change_page(self, delta):
+        new_page = self.current_page + delta
+        if 1 <= new_page <= self.total_pages:
+            self.current_page = new_page
+            self.load_video_list()
+
+    def show_list_view(self):
+        self.video_list_stack.setCurrentIndex(0)
+        self.load_video_list()
+
+    def load_channels(self):
+        try:
+            self.combo_channel.clear()
+            if not getattr(self, 'tts_client', None):
+                 self.tts_client = ElevenLabsClient()
+            conn = self.tts_client.get_db_connection()
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("SELECT channel_id, channel_name FROM channel WHERE state='1' ORDER BY channel_id ASC")
+            rows = cursor.fetchall()
+            cursor.close()
+            conn.close()
+            
+            for row in rows:
+                self.combo_channel.addItem(row['channel_name'], row['channel_id'])
+                
+        except Exception as e:
+            self.log_signal.emit(f"채널 로드 오류: {e}")
+
+    def switch_to_form_view(self, video_id=None):
+        self.current_video_id = video_id
+        
+        # Load Channels first
+        self.load_channels()
+        
+        # Clear fields
+        self.input_title.clear()
+        self.input_script.clear()
+        self.input_img_script.clear()
+        self.input_tts_text.clear()
+        self.input_description.clear()
+        
+        if video_id is None:
+            # Create Mode
+            self.btn_save_video.setText("저장")
+        else:
+            # Edit Mode - Fetch Data
+            self.btn_save_video.setText("수정")
+            self.load_video_detail(video_id)
+            
+        self.video_list_stack.setCurrentIndex(1)
+
+    def load_video_detail(self, video_id):
+        try:
+            if not getattr(self, 'tts_client', None):
+                 self.tts_client = ElevenLabsClient()
+            
+            conn = self.tts_client.get_db_connection()
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("SELECT * FROM video WHERE id = %s", (video_id,))
+            row = cursor.fetchone()
+            cursor.close()
+            conn.close()
+            
+            if row:
+                # Set Channel
+                channel_id = row['channel_id']
+                index = self.combo_channel.findData(channel_id)
+                if index >= 0:
+                    self.combo_channel.setCurrentIndex(index)
+                
+                self.input_title.setText(row['title'] or "")
+                self.input_script.setText(row['script'] or "")
+                self.input_img_script.setText(row['img_script'] or "")
+                self.input_tts_text.setText(row['tts_text'] or "")
+                self.input_description.setText(row['description'] or "")
+            else:
+                QMessageBox.warning(self, "오류", "데이터를 찾을 수 없습니다.")
+                self.show_list_view()
+                
+        except Exception as e:
+            QMessageBox.warning(self, "DB 오류", f"상세 조회 실패: {e}")
+            self.show_list_view()
+
+    def on_video_table_double_click(self, row, col):
+        # Get ID from first column
+        item = self.video_table.item(row, 0)
+        if item:
+            video_id = item.text()
+            self.switch_to_form_view(video_id)
+
+    def save_video_data(self):
+        title = self.input_title.text().strip()
+        script = self.input_script.toPlainText().strip()
+        img_script = self.input_img_script.toPlainText().strip()
+        tts_text = self.input_tts_text.toPlainText().strip()
+        description = self.input_description.toPlainText().strip()
+        channel_id = self.combo_channel.currentData()
+        
+        if not title:
+            QMessageBox.warning(self, "입력 오류", "제목은 필수 입력 항목입니다.")
+            return
+
+        try:
+            if not getattr(self, 'tts_client', None):
+                 self.tts_client = ElevenLabsClient()
+            conn = self.tts_client.get_db_connection()
+            cursor = conn.cursor()
+            
+            if self.current_video_id is None:
+                # INSERT
+                query = """
+                    INSERT INTO video (channel_id, title, script, img_script, tts_text, description, use_yn)
+                    VALUES (%s, %s, %s, %s, %s, %s, 'Y')
+                """
+                cursor.execute(query, (channel_id, title, script, img_script, tts_text, description))
+                msg = "새로운 영상 데이터가 등록되었습니다."
+            else:
+                # UPDATE
+                query = """
+                    UPDATE video 
+                    SET channel_id=%s, title=%s, script=%s, img_script=%s, tts_text=%s, description=%s
+                    WHERE id=%s
+                """
+                cursor.execute(query, (channel_id, title, script, img_script, tts_text, description, self.current_video_id))
+                msg = "영상 데이터가 수정되었습니다."
+                
+            conn.commit()
+            cursor.close()
+            conn.close()
+            
+            QMessageBox.information(self, "성공", msg)
+            self.show_list_view()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "저장 오류", f"DB 저장 중 오류 발생:\n{e}")
+            self.log_signal.emit(f"DB 저장 오류: {e}")
+
+    def load_video_list(self):
+        try:
+            if not getattr(self, 'tts_client', None):
+                 self.tts_client = ElevenLabsClient()
+            
+            conn = self.tts_client.get_db_connection()
+            cursor = conn.cursor(dictionary=True)
+            
+            # 1. Get Total Count (Only state='1' channels)
+            cursor.execute("SELECT COUNT(*) as cnt FROM video v JOIN channel c ON v.channel_id = c.channel_id WHERE c.state = '1'")
+            total_count = cursor.fetchone()['cnt']
+            
+            # 2. Calculate Pagination
+            import math
+            self.total_pages = math.ceil(total_count / self.items_per_page)
+            if self.total_pages < 1: self.total_pages = 1
+            
+            # Clamp current page
+            if self.current_page > self.total_pages: self.current_page = self.total_pages
+            if self.current_page < 1: self.current_page = 1
+            
+            offset = (self.current_page - 1) * self.items_per_page
+            
+            # 3. Fetch Data with Limit/Offset (Only state='1' channels)
+            query = f"""
+                SELECT v.*, c.channel_name 
+                FROM video v 
+                JOIN channel c ON v.channel_id = c.channel_id 
+                WHERE c.state = '1'
+                ORDER BY v.id DESC 
+                LIMIT {self.items_per_page} OFFSET {offset}
+            """
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            
+            # Update UI
+            self.lbl_page_info.setText(f"{self.current_page} / {self.total_pages}")
+            self.btn_prev_page.setEnabled(self.current_page > 1)
+            self.btn_next_page.setEnabled(self.current_page < self.total_pages)
+            
+            self.video_table.setRowCount(0)
+            
+            for row in rows:
+                row_idx = self.video_table.rowCount()
+                self.video_table.insertRow(row_idx)
+                
+                # ID
+                self.video_table.setItem(row_idx, 0, QTableWidgetItem(str(row['id'])))
+                # Channel Name
+                self.video_table.setItem(row_idx, 1, QTableWidgetItem(str(row['channel_name'] or '')))
+                # Title
+                self.video_table.setItem(row_idx, 2, QTableWidgetItem(str(row['title'])))
+                
+                # Script (Y/N) - Col 3
+                script_val = "Y" if row['script'] and str(row['script']).strip() else "N"
+                item_script = QTableWidgetItem(script_val)
+                item_script.setTextAlignment(Qt.AlignCenter)
+                self.video_table.setItem(row_idx, 3, item_script)
+                
+                # Img Script (Y/N) - Col 4
+                img_val = "Y" if row['img_script'] and str(row['img_script']).strip() else "N"
+                item_img = QTableWidgetItem(img_val)
+                item_img.setTextAlignment(Qt.AlignCenter)
+                self.video_table.setItem(row_idx, 4, item_img)
+                
+                # TTS (Y/N) - Col 5
+                tts_val = "Y" if row['tts_text'] and str(row['tts_text']).strip() else "N"
+                item_tts = QTableWidgetItem(tts_val)
+                item_tts.setTextAlignment(Qt.AlignCenter)
+                self.video_table.setItem(row_idx, 5, item_tts)
+                
+                # Desc (Y/N) - Col 6
+                desc_val = "Y" if row['description'] and str(row['description']).strip() else "N"
+                item_desc = QTableWidgetItem(desc_val)
+                item_desc.setTextAlignment(Qt.AlignCenter)
+                self.video_table.setItem(row_idx, 6, item_desc)
+                
+                # Use YN - Col 7
+                item_use = QTableWidgetItem(str(row['use_yn']))
+                item_use.setTextAlignment(Qt.AlignCenter)
+                self.video_table.setItem(row_idx, 7, item_use)
+                
+                # Created At (YYYY-MM-DD hh:mm) - Col 8
+                created_at = row['created_at']
+                date_str = ""
+                if created_at:
+                    if hasattr(created_at, 'strftime'):
+                         date_str = created_at.strftime("%Y-%m-%d %H:%M")
+                    else:
+                         date_str = str(created_at)[:16]
+                
+                item_date = QTableWidgetItem(date_str)
+                item_date.setTextAlignment(Qt.AlignCenter)
+                self.video_table.setItem(row_idx, 8, item_date)
+            
+            self.video_table.resizeColumnsToContents()
+            self.video_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch) # Stretch Title
+
+            cursor.close()
+            conn.close()
+            self.log_signal.emit(f"영상 목록 {len(rows)}개 로드 완료.")
+        except Exception as e:
+            # QMessageBox.warning(self, "DB Error", f"데이터 로드 중 오류: {e}")
+            self.log_signal.emit(f"데이터 로드 중 오류: {e}")
+
+    def initTabPrompt(self):
+        # State for Prompt Tab
+        self.current_prompt_id = None
+        self.current_prompt_page = 1
+        self.prompt_items_per_page = 15
+        self.prompt_total_pages = 1
+        
+        # Main Layout using StackedWidget
+        self.prompt_layout = QVBoxLayout()
+        self.prompt_stack = QStackedWidget()
+        
+        # === Page 1: List View ===
+        self.page_prompt_list = QWidget()
+        list_layout = QVBoxLayout()
+        
+        # Header
+        list_layout.addWidget(QLabel("📋 프롬프트/메모 목록"))
+        
+        
+        # Controls
+        btn_layout = QHBoxLayout()
+        
+        # Filter Combo
+        self.combo_prompt_filter_type = QComboBox()
+        self.combo_prompt_filter_type.setFixedWidth(120)
+        self.combo_prompt_filter_type.addItems(['전체', '대본', '설명', '이미지', 'TTS', '기타'])
+        self.combo_prompt_filter_type.currentIndexChanged.connect(lambda: self.change_prompt_page(0)) # Reset to page 1 on filter
+        
+        self.btn_new_prompt = QPushButton("➕ 신규 등록 (New)")
+        self.btn_new_prompt.setFixedWidth(150)
+        self.btn_new_prompt.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
+        self.btn_new_prompt.clicked.connect(lambda: self.switch_to_prompt_form(None))
+        
+        btn_layout.addWidget(QLabel("구분 필터:"))
+        btn_layout.addWidget(self.combo_prompt_filter_type)
+        btn_layout.addStretch()
+        btn_layout.addWidget(self.btn_new_prompt)
+        list_layout.addLayout(btn_layout)
+        
+        # Table
+        self.prompt_table = QTableWidget()
+        self.prompt_table.setColumnCount(6)
+        self.prompt_table.setHorizontalHeaderLabels(["ID", "채널", "구분", "제목", "사용", "생성일자"])
+        self.prompt_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.prompt_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.prompt_table.cellDoubleClicked.connect(self.on_prompt_table_double_click)
+        
+        # Table Header Styling
+        header = self.prompt_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setSectionResizeMode(3, QHeaderView.Stretch) # Title Stretch
+        
+        self.prompt_table.setStyleSheet("""
+            QTableWidget {
+                background-color: #2b2b2b; color: #d4d4d4; gridline-color: #444;
+            }
+            QHeaderView::section {
+                background-color: #333333; color: #ffffff; padding: 4px; border: 1px solid #444;
+            }
+        """)
+        list_layout.addWidget(self.prompt_table)
+        
+        # Pagination Controls
+        pagination_layout = QHBoxLayout()
+        pagination_layout.addStretch()
+        
+        self.btn_prev_prompt_page = QPushButton("◀ 이전")
+        self.btn_prev_prompt_page.setFixedSize(80, 30)
+        self.btn_prev_prompt_page.clicked.connect(lambda: self.change_prompt_page(-1))
+        
+        self.lbl_prompt_page_info = QLabel("1 / 1")
+        self.lbl_prompt_page_info.setStyleSheet("color: white; font-weight: bold; margin: 0 10px;")
+        self.lbl_prompt_page_info.setAlignment(Qt.AlignCenter)
+        
+        self.btn_next_prompt_page = QPushButton("다음 ▶")
+        self.btn_next_prompt_page.setFixedSize(80, 30)
+        self.btn_next_prompt_page.clicked.connect(lambda: self.change_prompt_page(1))
+        
+        pagination_layout.addWidget(self.btn_prev_prompt_page)
+        pagination_layout.addWidget(self.lbl_prompt_page_info)
+        pagination_layout.addWidget(self.btn_next_prompt_page)
+        pagination_layout.addStretch()
+        
+        list_layout.addLayout(pagination_layout)
+        self.page_prompt_list.setLayout(list_layout)
+        
+        # === Page 2: Form View ===
+        self.page_prompt_form = QWidget()
+        form_wrapper = QVBoxLayout()
+        
+        form_group = QGroupBox("프롬프트/메모 입력")
+        input_layout = QGridLayout()
+        
+        # Channel Selection
+        self.combo_prompt_channel = QComboBox()
+        
+        # Prompt Type Selection
+        self.combo_prompt_type = QComboBox()
+        self.combo_prompt_type.addItems(['대본', '설명', '이미지', 'TTS', '기타'])
+        
+        self.input_prompt_title = QLineEdit()
+        self.input_prompt_title.setPlaceholderText("제목 (Title)")
+        
+        self.input_prompt_contents = QTextEdit()
+        self.input_prompt_contents.setPlaceholderText("프롬프트 내용 (Contents)")
+        self.input_prompt_contents.setMinimumHeight(200)
+        
+        # Use YN (Radio Buttons or Checkbox - let's use Checkbox checked by default)
+        self.chk_prompt_use = QCheckBox("사용 여부 (Use)")
+        self.chk_prompt_use.setChecked(True)
+        
+        input_layout.addWidget(QLabel("채널:"), 0, 0)
+        input_layout.addWidget(self.combo_prompt_channel, 0, 1)
+        
+        input_layout.addWidget(QLabel("구분:"), 1, 0)
+        input_layout.addWidget(self.combo_prompt_type, 1, 1)
+        
+        input_layout.addWidget(QLabel("제목:"), 2, 0)
+        input_layout.addWidget(self.input_prompt_title, 2, 1)
+        
+        input_layout.addWidget(QLabel("내용:"), 3, 0, Qt.AlignTop)
+        input_layout.addWidget(self.input_prompt_contents, 3, 1)
+        
+        input_layout.addWidget(self.chk_prompt_use, 4, 1)
+        
+        form_group.setLayout(input_layout)
+        form_wrapper.addWidget(form_group)
+        
+        # Form Buttons
+        btn_form_layout = QHBoxLayout()
+        
+        btn_copy_content = QPushButton("내용 복사")
+        btn_copy_content.setFixedSize(100, 30)
+        btn_copy_content.clicked.connect(lambda: self.copy_to_clipboard(self.input_prompt_contents))
+        btn_form_layout.addWidget(btn_copy_content)
+        
+        # Download Button
+        btn_download_content = QPushButton("다운로드 (.txt)")
+        btn_download_content.setFixedSize(120, 30)
+        btn_download_content.setStyleSheet("background-color: #17a2b8; color: white;")
+        btn_download_content.clicked.connect(self.download_prompt_content)
+        btn_form_layout.addWidget(btn_download_content)
+        
+        btn_form_layout.addStretch()
+        
+        self.btn_cancel_prompt = QPushButton("목록")
+        self.btn_cancel_prompt.setFixedSize(100, 30)
+        self.btn_cancel_prompt.clicked.connect(self.show_prompt_list_view)
+        
+        self.btn_delete_prompt = QPushButton("삭제")
+        self.btn_delete_prompt.setFixedSize(100, 30)
+        self.btn_delete_prompt.setStyleSheet("background-color: #dc3545; color: white;")
+        self.btn_delete_prompt.clicked.connect(self.delete_prompt_data)
+        
+        self.btn_save_prompt = QPushButton("저장")
+        self.btn_save_prompt.setFixedSize(100, 30)
+        self.btn_save_prompt.setStyleSheet("background-color: #007bff; color: white;")
+        self.btn_save_prompt.clicked.connect(self.save_prompt_data)
+        
+        btn_form_layout.addWidget(self.btn_cancel_prompt)
+        btn_form_layout.addWidget(self.btn_delete_prompt)
+        btn_form_layout.addWidget(self.btn_save_prompt)
+        
+        form_wrapper.addLayout(btn_form_layout)
+        self.page_prompt_form.setLayout(form_wrapper)
+        
+        # Add to stack
+        self.prompt_stack.addWidget(self.page_prompt_list)
+        self.prompt_stack.addWidget(self.page_prompt_form)
+        
+        self.prompt_layout.addWidget(self.prompt_stack)
+        self.tab_prompt.setLayout(self.prompt_layout)
+        
+        # Init Load
+        QTimer.singleShot(1500, self.load_prompt_list)
+
+    def change_prompt_page(self, delta):
+        # 0 delta means reset (e.g. filter change)
+        if delta == 0:
+             self.current_prompt_page = 1
+        else:
+            new_page = self.current_prompt_page + delta
+            if 1 <= new_page <= self.prompt_total_pages:
+                self.current_prompt_page = new_page
+        
+        self.load_prompt_list()
+
+    def show_prompt_list_view(self):
+        self.prompt_stack.setCurrentIndex(0)
+        self.load_prompt_list()
+
+    def load_prompt_channels(self):
+        try:
+            self.combo_prompt_channel.clear()
+            if not getattr(self, 'tts_client', None):
+                 self.tts_client = ElevenLabsClient()
+            conn = self.tts_client.get_db_connection()
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("SELECT channel_id, channel_name FROM channel WHERE state='1' ORDER BY channel_id ASC")
+            rows = cursor.fetchall()
+            cursor.close()
+            conn.close()
+            
+            for row in rows:
+                self.combo_prompt_channel.addItem(row['channel_name'], row['channel_id'])
+                
+        except Exception as e:
+            self.log_signal.emit(f"채널 로드 오류: {e}")
+
+    def download_prompt_content(self):
+        content = self.input_prompt_contents.toPlainText()
+        if not content:
+            QMessageBox.warning(self, "경고", "다운로드할 내용이 없습니다.")
+            return
+
+        title = self.input_prompt_title.text().strip()
+        default_filename = f"{title}.txt" if title else "prompt_content.txt"
+        
+        # Clean filename
+        default_filename = re.sub(r'[\\/*?:"<>|]', "", default_filename)
+        
+        file_path, _ = QFileDialog.getSaveFileName(self, "텍스트 파일 저장", default_filename, "Text Files (*.txt);;All Files (*)")
+        
+        if file_path:
+            try:
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                QMessageBox.information(self, "성공", f"파일이 저장되었습니다:\n{file_path}")
+            except Exception as e:
+                QMessageBox.critical(self, "오류", f"파일 저장 중 오류: {e}")
+
+    def switch_to_prompt_form(self, prompt_id=None):
+        self.current_prompt_id = prompt_id
+        
+        # Load Channels
+        self.load_prompt_channels()
+        
+        self.input_prompt_title.clear()
+        self.input_prompt_contents.clear()
+        self.combo_prompt_type.setCurrentIndex(0)
+        self.chk_prompt_use.setChecked(True)
+        
+        if prompt_id is None:
+            # Create
+            self.btn_save_prompt.setText("저장")
+            self.btn_delete_prompt.setVisible(False)
+        else:
+            # Edit
+            self.btn_save_prompt.setText("수정")
+            self.btn_delete_prompt.setVisible(True)
+            self.load_prompt_detail(prompt_id)
+            
+        self.prompt_stack.setCurrentIndex(1)
+
+    def load_prompt_detail(self, prompt_id):
+        try:
+            if not getattr(self, 'tts_client', None):
+                 self.tts_client = ElevenLabsClient()
+            conn = self.tts_client.get_db_connection()
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("SELECT * FROM prompt WHERE id = %s", (prompt_id,))
+            row = cursor.fetchone()
+            cursor.close()
+            conn.close()
+            
+            if row:
+                # Channel
+                channel_id = row['channel_id']
+                idx = self.combo_prompt_channel.findData(channel_id)
+                if idx >= 0:
+                    self.combo_prompt_channel.setCurrentIndex(idx)
+                    
+                # Type
+                p_type = row['prompt_type']
+                t_idx = self.combo_prompt_type.findText(p_type)
+                if t_idx >= 0:
+                    self.combo_prompt_type.setCurrentIndex(t_idx)
+                else:
+                    self.combo_prompt_type.setCurrentText(p_type) # Allow custom text if combo is editable, but it's not set to editable based on my code. Defaults to 0 if not found is safer or add item.
+                
+                self.input_prompt_title.setText(row['title'] or "")
+                self.input_prompt_contents.setText(row['contents'] or "")
+                self.chk_prompt_use.setChecked(row['use_yn'] == 'Y')
+            else:
+                QMessageBox.warning(self, "오류", "데이터를 찾을 수 없습니다.")
+                self.show_prompt_list_view()
+        except Exception as e:
+            QMessageBox.warning(self, "오류", f"상세 조회 실패: {e}")
+            self.show_prompt_list_view()
+
+    def on_prompt_table_double_click(self, row, col):
+        item = self.prompt_table.item(row, 0)
+        if item:
+            prompt_id = item.text()
+            self.switch_to_prompt_form(prompt_id)
+
+    def save_prompt_data(self):
+        channel_id = self.combo_prompt_channel.currentData()
+        prompt_type = self.combo_prompt_type.currentText()
+        title = self.input_prompt_title.text().strip()
+        contents = self.input_prompt_contents.toPlainText().strip()
+        use_yn = 'Y' if self.chk_prompt_use.isChecked() else 'N'
+        
+        if not title:
+            QMessageBox.warning(self, "입력 오류", "제목은 필수 입력 항목입니다.")
+            return
+            
+        try:
+            if not getattr(self, 'tts_client', None):
+                 self.tts_client = ElevenLabsClient()
+            conn = self.tts_client.get_db_connection()
+            cursor = conn.cursor()
+            
+            if self.current_prompt_id is None:
+                # INSERT
+                query = """
+                    INSERT INTO prompt (channel_id, prompt_type, title, contents, use_yn) 
+                    VALUES (%s, %s, %s, %s, %s)
+                """
+                cursor.execute(query, (channel_id, prompt_type, title, contents, use_yn))
+                msg = "프롬프트가 저장되었습니다."
+            else:
+                # UPDATE
+                query = """
+                    UPDATE prompt 
+                    SET channel_id=%s, prompt_type=%s, title=%s, contents=%s, use_yn=%s 
+                    WHERE id=%s
+                """
+                cursor.execute(query, (channel_id, prompt_type, title, contents, use_yn, self.current_prompt_id))
+                msg = "프롬프트가 수정되었습니다."
+            
+            conn.commit()
+            cursor.close()
+            conn.close()
+            
+            QMessageBox.information(self, "성공", msg)
+            self.show_prompt_list_view()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "저장 오류", f"DB 저장 중 오류 발생: {e}")
+
+    def delete_prompt_data(self):
+        if not self.current_prompt_id:
+            return
+            
+        res = QMessageBox.question(self, "삭제 확인", "정말 삭제하시겠습니까?", QMessageBox.Yes | QMessageBox.No)
+        if res != QMessageBox.Yes:
+            return
+            
+        try:
+            if not getattr(self, 'tts_client', None):
+                 self.tts_client = ElevenLabsClient()
+            conn = self.tts_client.get_db_connection()
+            cursor = conn.cursor()
+            # Hard delete based on previous pattern, but could be soft delete if requested. 
+            # User said "same as video list". Video list doesn't have a delete button in the code I saw (only INSERT/UPDATE).
+            # But I added a delete button here. I'll stick to DELETE for now as 'use_yn' is also editable.
+            cursor.execute("DELETE FROM prompt WHERE id = %s", (self.current_prompt_id,))
+            conn.commit()
+            cursor.close()
+            conn.close()
+            
+            QMessageBox.information(self, "삭제", "삭제되었습니다.")
+            self.show_prompt_list_view()
+        except Exception as e:
+            QMessageBox.critical(self, "삭제 오류", f"삭제 실패: {e}")
+
+    def load_prompt_list(self):
+        try:
+            if not getattr(self, 'tts_client', None):
+                 self.tts_client = ElevenLabsClient()
+            conn = self.tts_client.get_db_connection()
+            cursor = conn.cursor(dictionary=True)
+            
+            filter_type = self.combo_prompt_filter_type.currentText()
+            where_clause = "WHERE c.state = '1'"
+            params = []
+            
+            if filter_type != '전체':
+                where_clause += " AND p.prompt_type = %s"
+                params.append(filter_type)
+            
+            # 1. Total Count
+            count_query = f"SELECT COUNT(*) as cnt FROM prompt p JOIN channel c ON p.channel_id = c.channel_id {where_clause}"
+            cursor.execute(count_query, params)
+            total_count = cursor.fetchone()['cnt']
+            
+            # 2. Pagination
+            import math
+            self.prompt_total_pages = math.ceil(total_count / self.prompt_items_per_page)
+            if self.prompt_total_pages < 1: self.prompt_total_pages = 1
+            
+            if self.current_prompt_page > self.prompt_total_pages: self.current_prompt_page = self.prompt_total_pages
+            if self.current_prompt_page < 1: self.current_prompt_page = 1
+            
+            offset = (self.current_prompt_page - 1) * self.prompt_items_per_page
+            
+            # 3. Fetch
+            query = f"""
+                SELECT p.*, c.channel_name 
+                FROM prompt p 
+                JOIN channel c ON p.channel_id = c.channel_id 
+                {where_clause}
+                ORDER BY p.id DESC 
+                LIMIT {self.prompt_items_per_page} OFFSET {offset}
+            """
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            
+            # Update UI
+            self.lbl_prompt_page_info.setText(f"{self.current_prompt_page} / {self.prompt_total_pages}")
+            self.btn_prev_prompt_page.setEnabled(self.current_prompt_page > 1)
+            self.btn_next_prompt_page.setEnabled(self.current_prompt_page < self.prompt_total_pages)
+            
+            self.prompt_table.setRowCount(0)
+            for row in rows:
+                row_idx = self.prompt_table.rowCount()
+                self.prompt_table.insertRow(row_idx)
+                
+                # ID
+                self.prompt_table.setItem(row_idx, 0, QTableWidgetItem(str(row['id'])))
+                # Channel
+                self.prompt_table.setItem(row_idx, 1, QTableWidgetItem(str(row['channel_name'] or '')))
+                # Type
+                self.prompt_table.setItem(row_idx, 2, QTableWidgetItem(str(row['prompt_type'] or '')))
+                # Title
+                self.prompt_table.setItem(row_idx, 3, QTableWidgetItem(str(row['title'] or '')))
+                
+                # Use YN
+                item_use = QTableWidgetItem(str(row['use_yn'] or 'Y'))
+                item_use.setTextAlignment(Qt.AlignCenter)
+                self.prompt_table.setItem(row_idx, 4, item_use)
+                # Date
+                created_at = row['created_at']
+                date_str = str(created_at)[:16] if created_at else ""
+                item_date = QTableWidgetItem(date_str)
+                item_date.setTextAlignment(Qt.AlignCenter)
+                self.prompt_table.setItem(row_idx, 5, item_date)
+            
+            self.prompt_table.resizeColumnsToContents()
+            self.prompt_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+            
+            cursor.close()
+            conn.close()
+        except Exception as e:
+            self.log_signal.emit(f"프롬프트 목록 로드 오류: {e}")
+
+    def initTabGoldPrice(self):
+        layout = QVBoxLayout()
+        
+        btn_layout = QHBoxLayout()
+        self.btn_fetch_gold = QPushButton("금시세 가져오기")
+        self.btn_fetch_gold.setFixedSize(150, 40)
+        self.btn_fetch_gold.clicked.connect(self.fetch_gold_price)
+        btn_layout.addWidget(self.btn_fetch_gold)
+        
+        self.btn_create_gold_image = QPushButton("이미지 생성")
+        self.btn_create_gold_image.setFixedSize(150, 40)
+        self.btn_create_gold_image.setStyleSheet("background-color: #E61717; color: white; font-weight: bold;")
+        self.btn_create_gold_image.clicked.connect(self.create_gold_image)
+        self.btn_create_gold_image.setEnabled(False) # Data required first
+        btn_layout.addWidget(self.btn_create_gold_image)
+        
+        btn_layout.addStretch()
+        layout.addLayout(btn_layout)
+        
+        self.txt_gold_price_result = QTextEdit()
+        self.txt_gold_price_result.setPlaceholderText("금시세 가져오기 버튼을 눌러 데이터를 확인하세요.")
+        layout.addWidget(self.txt_gold_price_result)
+        
+        self.tab_gold_price.setLayout(layout)
+        
+        self.gold_data = None # Store parsed data here
+
+    def fetch_gold_price(self):
+        try:
+            # Import locally to ensure it's available after install
+            from bs4 import BeautifulSoup
+            import requests
+            
+            url = "https://www.kumsise.com/main/index.php"
+            response = requests.get(url)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Find the specific div
+            target_div = soup.find('div', class_='korGold_price')
+            
+            if target_div:
+                # 1. Date
+                date_elem = target_div.find('p', class_='pricedate')
+                date_str = date_elem.get_text(strip=True) if date_elem else datetime.now().strftime("%Y-%m-%d")
+                
+                result_text = f"📅 기준일: {date_str}\n"
+                result_text += "=" * 30 + "\n"
+                
+                self.gold_data = {
+                    'date': date_str,
+                    'rows': [],
+                    'international': {'gold': '-', 'silver': '-'}
+                }
+                
+                # 2. Table Parsing
+                rows = target_div.find_all('tr')
+                
+                for row in rows:
+                    cols = row.find_all(['th', 'td'])
+                    if not cols: continue
+                    
+                    has_td = row.find('td')
+                    if not has_td: continue
+                    
+                    if len(cols) >= 3:
+                        item_name = cols[0].get_text(strip=True)
+                        
+                        def parse_price_cell(col):
+                            # Price
+                            price = col.get_text(strip=True).split('원')[0]
+                            if "제품시세" in col.get_text():
+                                price = "제품시세 적용"
+                                change_txt = ""
+                            else:
+                                # Change info inside span
+                                span = col.find('span')
+                                change_txt = span.get_text(" ", strip=True) if span else "" 
+                            return price, change_txt
+                            
+                        price_sell, change_sell = parse_price_cell(cols[1])
+                        price_buy, change_buy = parse_price_cell(cols[2])
+                        
+                        self.gold_data['rows'].append({
+                            'name': item_name,
+                            'sell_price': price_sell,
+                            'sell_change': change_sell,
+                            'buy_price': price_buy,
+                            'buy_change': change_buy
+                        })
+                        
+                        result_text += f"🏷️ {item_name}\n"
+                        result_text += f"  🔻 팔때: {price_sell}원 ({change_sell})\n"
+                        result_text += f"  🔺 살때: {price_buy}원 ({change_buy})\n"
+                        result_text += "-" * 30 + "\n"
+
+                # --- 2. International Spot Data (Gold-API) ---
+                try:
+                    headers = {
+                        'x-access-token': 'goldapi-h0qzsmkjgexce-io',
+                        'Content-Type': 'application/json'
+                    }
+                    
+                    # 1. Gold (XAU)
+                    gold_url = "https://www.goldapi.io/api/XAU/USD"
+                    resp_gold = requests.get(gold_url, headers=headers, timeout=5)
+                    intl_gold = '-'
+                    if resp_gold.status_code == 200:
+                        # {"price": 2662.5, ...}
+                        intl_gold = resp_gold.json().get('price', '-')
+                        
+                    # 2. Silver (XAG)
+                    silver_url = "https://www.goldapi.io/api/XAG/USD"
+                    resp_silver = requests.get(silver_url, headers=headers, timeout=5)
+                    intl_silver = '-'
+                    if resp_silver.status_code == 200:
+                        intl_silver = resp_silver.json().get('price', '-')
+
+                    self.gold_data['international'] = {
+                        'gold': str(intl_gold),
+                        'silver': str(intl_silver),
+                        'time': datetime.now().strftime("%m.%d %H:%M") # Capture fetch time
+                    }
+                    
+                    result_text += f"\n🌎 국제 시세 (Spot) - {self.gold_data['international']['time']} 기준\n"
+                    result_text += f"  💰 Gold: ${intl_gold}\n"
+                    result_text += f"  🥈 Silver: ${intl_silver}\n"
+                    
+                except Exception as e_spot:
+                    result_text += f"\n⚠️ 국제 시세 조회 실패: {e_spot}\n"
+
+                self.txt_gold_price_result.setText(result_text)
+                self.btn_create_gold_image.setEnabled(True)
+                self.log_signal.emit("✅ 금시세 데이터를 성공적으로 가져왔습니다.")
+            else:
+                self.txt_gold_price_result.setText("지정된 요소(<div class='korGold_price'>)를 찾을 수 없습니다.")
+                self.log_signal.emit("⚠️ 금시세 요소를 찾을 수 없습니다.")
+                
+        except Exception as e:
+            self.txt_gold_price_result.setText(f"오류 발생: {e}")
+            self.log_signal.emit(f"❌ 금시세 가져오기 실패: {e}")
+
+    def create_gold_image(self):
+        if not self.gold_data:
+            QMessageBox.warning(self, "데이터 없음", "먼저 금시세를 가져와주세요.")
+            return
+            
+        try:
+            # Half of 9:16 (1080x1920) -> 1080 x 960
+            W, H = 1080, 960
+            image = QImage(W, H, QImage.Format_ARGB32)
+            # Dark Background (Deep Grey/Black Gradient)
+            image.fill(QColor("#111111"))
+            
+            painter = QPainter(image)
+            try:
+                painter.setRenderHint(QPainter.Antialiasing)
+                
+                # --- Tools ---
+                def draw_glass_rect(rect, radius=20, opacity=50):
+                    # Glass effect: semi-transparent black/white with subtle border
+                    painter.setBrush(QColor(30, 30, 30, 200))
+                    painter.setPen(QPen(QColor(255, 255, 255, 30), 1.5))
+                    painter.drawRoundedRect(rect, radius, radius)
+                    
+                def draw_gold_gradient_text(rect, text, font):
+                    # Create a gradient for text
+                    gradient = QLinearGradient(rect.topLeft(), rect.bottomRight())
+                    gradient.setColorAt(0.0, QColor("#FDB931")) # Light Gold
+                    gradient.setColorAt(0.5, QColor("#FDCB5C"))
+                    gradient.setColorAt(1.0, QColor("#D4AF37")) # Metallic Gold
+                    
+                    painter.setPen(QPen(QBrush(gradient), 1))
+                    painter.setFont(font)
+                    painter.drawText(rect, Qt.AlignCenter, text)
+                    
+                def draw_gold_plate_header(rect, text):
+                    # Gold gradient background
+                    gradient = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+                    gradient.setColorAt(0.0, QColor("#C6A355")) # Darker gold top
+                    gradient.setColorAt(0.2, QColor("#F9E292")) # Shine
+                    gradient.setColorAt(0.7, QColor("#C6A355"))
+                    
+                    painter.setBrush(QBrush(gradient))
+                    painter.setPen(Qt.NoPen)
+                    painter.drawRoundedRect(rect, 15, 15)
+                    
+                    # Shine effect
+                    shine_rect = QRectF(rect.x(), rect.y(), rect.width(), rect.height()/2)
+                    painter.setBrush(QColor(255, 255, 255, 40))
+                    painter.drawRoundedRect(shine_rect, 15, 15)
+                    
+                    # Text
+                    painter.setPen(QColor("#3E2C09")) # Dark Brown for contrast on gold
+                    font = QFont("Malgun Gothic", 28, QFont.Bold) # Reduced from 32
+                    font.setLetterSpacing(QFont.AbsoluteSpacing, 2)
+                    painter.setFont(font)
+                    painter.drawText(rect, Qt.AlignCenter, text)
+
+                # --- Background Ambiance ---
+                # Subtle spotlight center
+                bg_gradient = QRadialGradient(W/2, H/2, W/1.5)
+                bg_gradient.setColorAt(0.0, QColor("#2a2a2a"))
+                bg_gradient.setColorAt(1.0, QColor("#050505"))
+                painter.fillRect(0, 0, W, H, bg_gradient)
+                
+                # --- Main Container ---
+                # Width 1000 (margins 40 side), Height 900 (margins 30 top/bot)
+                container_w, container_h = 1000, 900
+                cx, cy = (W - container_w)//2, (H - container_h)//2
+                container_rect = QRect(cx, cy, container_w, container_h)
+                
+                # Outer Glow/Border
+                painter.setBrush(QColor(20, 20, 20, 180))
+                painter.setPen(QPen(QColor("#C6A355"), 2)) # Gold Border
+                painter.drawRoundedRect(container_rect, 30, 30)
+
+                # --- Header Content ---
+                # Main Title: "국내 금시세"
+                title_rect = QRect(cx, cy + 25, container_w, 70)
+                title_font = QFont("Malgun Gothic", 36, QFont.Bold) # Reduced from 42
+                
+                # Draw title with glowing effect manually for emphasis
+                painter.setPen(QPen(QColor("#FDB931"), 2))
+                painter.setFont(title_font)
+                painter.drawText(title_rect, Qt.AlignCenter, "국내 금시세")
+                
+                # Timestamp (Top Right)
+                if 'international' in self.gold_data:
+                    timestamp = self.gold_data['international'].get('time', '')
+                    if timestamp:
+                        painter.setFont(QFont("Malgun Gothic", 14, QFont.Bold)) # Reduced from 16
+                        painter.setPen(QColor("#DDDDDD"))
+                        # Shift left a bit more to fit
+                        time_rect = QRect(cx + container_w - 320, cy + 30, 300, 40)
+                        painter.drawText(time_rect, Qt.AlignRight | Qt.AlignVCenter, f"{timestamp} 기준")
+                
+                # Date Header (Shifted down)
+                header_h = 70 # Reduced from 80
+                header_rect = QRect(cx + 50, cy + 100, container_w - 100, header_h)
+                # Use data date
+                date_str = self.gold_data['date'] # e.g. 2024-10-27
+                # Format nicely if possible. "2024년 10월 27일" format
+                try:
+                    dt = datetime.strptime(date_str, "%Y-%m-%d")
+                    date_display = dt.strftime("%Y년 %m월 %d일")
+                except:
+                    date_display = date_str
+                
+                draw_gold_plate_header(header_rect, date_display)
+                
+                # --- Table Data ---
+                table_y = cy + 190
+                
+                # Column Headers
+                # Width 1000 -> [Name 280] [Sell 340] [Buy 340] Use gaps 10
+                # Offsets: cx+20, cx+310, cx+660
+                
+                col1_x = cx + 20
+                col2_x = cx + 310
+                col3_x = cx + 660
+                col_w_name = 280
+                col_w_price = 330 # slightly less than 340
+                
+                # Draw Column Headers "판매", "매입"
+                painter.setPen(QColor("#AAAAAA"))
+                font_col_header = QFont("Malgun Gothic", 18) # Reduced from 20
+                
+                # Center of Col2 area
+                rect_h_sell = QRect(col2_x, table_y, col_w_price, 35)
+                painter.setFont(font_col_header)
+                painter.drawText(rect_h_sell, Qt.AlignCenter, "판 매") # User Buy (High Price)
+                
+                rect_h_buy = QRect(col3_x, table_y, col_w_price, 35)
+                painter.drawText(rect_h_buy, Qt.AlignCenter, "매 입") # User Sell (Low Price)
+                
+                current_y = table_y + 50
+                row_h = 85 # Reduced from 95
+                gap = 12
+                
+                font_row_name = QFont("Malgun Gothic", 22, QFont.Bold) # Reduced from 26
+                font_price = QFont("Malgun Gothic", 26, QFont.Bold)   # Reduced from 32
+                
+                for row in self.gold_data['rows']:
+                    # Row Rects
+                    rect_name = QRect(col1_x, current_y, col_w_name, row_h)
+                    rect_sell = QRect(col2_x, current_y, col_w_price, row_h) # Col 2
+                    rect_buy = QRect(col3_x, current_y, col_w_price, row_h)  # Col 3
+                    
+                    # Glass Backgrounds per cell
+                    draw_glass_rect(rect_name, 12)
+                    draw_glass_rect(rect_sell, 12)
+                    draw_glass_rect(rect_buy, 12)
+                    
+                    # 1. Name & Icon
+                    # Draw Icon Placeholder (Gold Bar/Coin)
+                    icon_rect = QRect(rect_name.x() + 20, rect_name.y() + 15, 50, 50)
+                    
+                    # Simple Icon Drawing based on name
+                    name = row['name']
+                    painter.setPen(Qt.NoPen)
+                    if "순금" in name:
+                        # Gold Bar
+                        gradient = QLinearGradient(icon_rect.topLeft(), icon_rect.bottomLeft())
+                        gradient.setColorAt(0, QColor("#FFD700"))
+                        gradient.setColorAt(1, QColor("#B8860B"))
+                        painter.setBrush(gradient)
+                        # Trapezoid shape for bar
+                        path = QPainterPath()
+                        path.moveTo(icon_rect.x()+10, icon_rect.y()+10)
+                        path.lineTo(icon_rect.x()+40, icon_rect.y()+10)
+                        path.lineTo(icon_rect.x()+50, icon_rect.y()+40)
+                        path.lineTo(icon_rect.x(), icon_rect.y()+40)
+                        path.closeSubpath()
+                        painter.drawPath(path)
+                    elif "18k" in name or "14k" in name:
+                        # Coin
+                        gradient = QLinearGradient(icon_rect.topLeft(), icon_rect.bottomRight())
+                        gradient.setColorAt(0, QColor("#FDCB5C"))
+                        gradient.setColorAt(1, QColor("#C6A355"))
+                        painter.setBrush(gradient)
+                        painter.drawEllipse(icon_rect.adjusted(5,5,-5,-5))
+                        painter.setBrush(Qt.NoBrush)
+                        painter.setPen(QPen(QColor("#B8860B"), 2))
+                        painter.drawEllipse(icon_rect.adjusted(10,10,-10,-10))
+                    elif "은" in name or "백금" in name:
+                        # Silver Bar/Coin
+                        gradient = QLinearGradient(icon_rect.topLeft(), icon_rect.bottomLeft())
+                        gradient.setColorAt(0, QColor("#E0E0E0"))
+                        gradient.setColorAt(1, QColor("#909090"))
+                        painter.setBrush(gradient)
+                        painter.setPen(Qt.NoPen)
+                        if "백금" in name: # Bar
+                            painter.drawRoundedRect(icon_rect.adjusted(5,15,-5,-15), 5, 5)
+                        else: # Coin
+                            painter.drawEllipse(icon_rect.adjusted(8,8,-8,-8))
+                    
+                    # Name Text
+                    painter.setPen(QColor("#E0E0E0"))
+                    painter.setFont(font_row_name)
+                    # Shift text right after icon
+                    name_text_rect = rect_name.adjusted(80, 0, 0, 0)
+                    
+                    display_name = name
+                    if "돈" not in display_name:
+                        display_name += " 1돈"
+                        
+                    painter.drawText(name_text_rect, Qt.AlignLeft | Qt.AlignVCenter, display_name)
+                    
+                    # 2. Prices
+                    # Mapping Reminder:
+                    # Table "판매" (Sale) = User Buys = `price_buy` data
+                    # Table "매입" (Purchase) = User Sells = `price_sell` data
+                    
+                    # Helper to draw price
+                    def draw_price_cell(rect, price):
+                        if price == "제품시세 적용":
+                            painter.setPen(QColor("#CCCCCC"))
+                            painter.setFont(QFont("Malgun Gothic", 18, QFont.Bold)) # Smaller
+                            painter.drawText(rect, Qt.AlignCenter, price)
+                            return
+                        
+                        # Gold Text Color
+                        painter.setPen(QColor("#FDD017")) # Goldish Yellow
+                        painter.setFont(font_price)
+                        
+                        # Align Center
+                        # Add "원" smaller
+                        full_text = f"{price}"
+                        # Just draw simple text for now to match look
+                        painter.drawText(rect, Qt.AlignCenter, full_text + " 원")
+
+                    draw_price_cell(rect_sell, row['buy_price']) # Swapped to match "Sale"
+                    draw_price_cell(rect_buy, row['sell_price']) # Swapped to match "Purchase"
+                    
+                    current_y += row_h + gap
+
+                # --- Draw International Section ---
+                if 'international' in self.gold_data:
+                    intl = self.gold_data['international']
+                    if intl['gold'] != '-':
+                        # Separator Line or just space? 
+                        # We have space.
+                        
+                        # Int'l Container
+                        intl_rect = QRect(cx + 50, current_y + 10, container_w - 100, 80)
+                        
+                        # Glass background for Intl
+                        draw_glass_rect(intl_rect, 15)
+                        
+                        # "국제 금시세 (Spot)" Header + Time
+                        # Header
+                        painter.setFont(QFont("Malgun Gothic", 16, QFont.Bold))
+                        painter.setPen(QColor("#AAAAAA"))
+                        label_rect = QRect(intl_rect.x() + 20, intl_rect.y(), 200, 80)
+                        painter.drawText(label_rect, Qt.AlignLeft | Qt.AlignVCenter, "국제 시세 (Spot)")
+                        
+                        # Values
+                        # Gold
+                        painter.setFont(QFont("Malgun Gothic", 22, QFont.Bold))
+                        painter.setPen(QColor("#FDD017"))
+                        gold_rect = QRect(intl_rect.x() + 220, intl_rect.y(), 300, 80)
+                        painter.drawText(gold_rect, Qt.AlignLeft | Qt.AlignVCenter, f"Gold  ${intl['gold']} /oz")
+                        
+                        # Silver
+                        painter.setPen(QColor("#E0E0E0"))
+                        silver_rect = QRect(intl_rect.x() + 540, intl_rect.y(), 300, 80)
+                        painter.drawText(silver_rect, Qt.AlignLeft | Qt.AlignVCenter, f"Silver  ${intl['silver']} /oz")
+            finally:
+                painter.end()
+            
+            # Save
+            filename = f"gold_price_premium_{self.gold_data['date']}.png"
+            path = os.path.join(os.getcwd(), filename)
+            image.save(path)
+            
+            QMessageBox.information(self, "완료", f"프리미엄 이미지가 생성되었습니다:\n{path}")
+            os.startfile(path)
+            
+        except Exception as e:
+            QMessageBox.critical(self, "이미지 생성 실패", f"오류: {e}")
+            self.log_signal.emit(f"이미지 생성 오류: {e}")
+
+
 class BatchVideoEffectWorker(VideoMergerWorker):
     def __init__(self, input_dir, output_dir, style=None, volume=1.0, trim_end=0.0, effect_config=None):
         # 부모 생성자 호출 (경로는 input_dir로 설정)
@@ -3120,13 +4475,17 @@ class AudioTranscriberWorker(QThread):
                         srt_path = os.path.join(in_dir, base + ".srt")
                         
                         if os.path.exists(srt_path):
-                            self.log_signal.emit(f"   ⏩ 이미 존재함: {base}.srt")
-                            continue
+                            self.log_signal.emit(f"   ⚠️ 이미 존재함 (덮어쓰기): {base}.srt")
+                            # continue # 덮어쓰기 위해 continue 제거
                             
                         self.log_signal.emit(f"   Transcribing: {f_name} ...")
                         try:
                             # Transcribe
+                            # Transcribe
                             result = whisper_model.transcribe(in_path)
+                            detected_lang = result.get('language', 'en')
+                            limit_len = 16 if detected_lang == 'ja' else 26
+                            self.log_signal.emit(f"   ℹ️ 감지된 언어: {detected_lang}, 자막 제한: {limit_len}자")
                             
                             # Write SRT
                             # Write SRT
@@ -3137,31 +4496,48 @@ class AudioTranscriberWorker(QThread):
                                     start_time = segment["start"]
                                     end_time = segment["end"]
                                     
-                                    # 26자 제한 체크 및 분할
-                                    if len(original_text) > 26:
-                                        # 간단한 공백 기준 분리 후 재조합 방식
-                                        words = original_text.split()
+                                    # 제한 체크 및 분할
+                                    if len(original_text) > limit_len:
+                                        # 스마트 청크 나누기 (문장 부호 보전 및 문맥 고려)
                                         chunks = []
-                                        current_chunk = []
-                                        current_len = 0
+                                        remain_text = original_text
                                         
-                                        for word in words:
-                                            if current_len + len(word) + (1 if current_chunk else 0) > 26:
-                                                if current_chunk:
-                                                    chunks.append(" ".join(current_chunk))
-                                                    current_chunk = [word]
-                                                    current_len = len(word)
-                                                else:
-                                                    # 단어 하나가 26자 넘는 경우 (거의 없겠지만)
-                                                    chunks.append(word)
-                                                    current_chunk = []
-                                                    current_len = 0
+                                        delims = ['。', '、', '.', ',', '!', '?', ' ']
+                                        max_len = limit_len
+                                        
+                                        while len(remain_text) > max_len:
+                                            cut_idx = -1
+                                            
+                                            # 1. max_len 안에서 가장 뒤에 있는 구분자(문장부호/공백) 찾기
+                                            candidate = remain_text[:max_len]
+                                            for i in range(len(candidate) - 1, -1, -1):
+                                                if candidate[i] in delims:
+                                                    cut_idx = i
+                                                    break
+                                            
+                                            if cut_idx != -1:
+                                                # 구분자 뒤에서 자름 (구분자 포함)
+                                                chunks.append(remain_text[:cut_idx+1].strip())
+                                                remain_text = remain_text[cut_idx+1:].strip()
                                             else:
-                                                current_chunk.append(word)
-                                                current_len += len(word) + (1 if current_chunk else 0)
+                                                # 구분자가 없으면 강제 분할하되, 뒤따라오는 문장부호 확인 (부호 고아 방지)
+                                                curr_cut = max_len
+                                                
+                                                # 오버플로우 허용 (최대 3글자까지 문장부호라면 포함)
+                                                for _ in range(3):
+                                                    if curr_cut < len(remain_text) and remain_text[curr_cut] in delims:
+                                                        curr_cut += 1
+                                                    else:
+                                                        break
+                                                
+                                                chunks.append(remain_text[:curr_cut].strip())
+                                                remain_text = remain_text[curr_cut:].strip()
                                         
-                                        if current_chunk:
-                                            chunks.append(" ".join(current_chunk))
+                                        if remain_text:
+                                            chunks.append(remain_text.strip())
+                                        
+                                        # 빈 청크 제거
+                                        chunks = [c for c in chunks if c]
                                         
                                         # 시간 배분 (글자 수 비율로)
                                         total_duration = end_time - start_time
@@ -3687,6 +5063,9 @@ class AudioToVideoWorker(QThread):
             s = float(parts[2])
             return h*3600 + m*60 + s
         return 0.0
+
+
+
 
 
 if __name__ == '__main__':

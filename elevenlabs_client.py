@@ -11,10 +11,10 @@ import imageio_ffmpeg
 class ElevenLabsClient:
     def __init__(self):
         self.db_config = {
-            'user': 'youtubedev',
+            'user': 'youtube',
             'password': 'youtube2122',
             'host': 'devlab.pics',
-            'database': 'youtubedevdb',
+            'database': 'youtubedb',
             'port': 3306,
             'use_pure': True
         }
