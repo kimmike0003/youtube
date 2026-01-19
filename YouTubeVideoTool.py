@@ -49,6 +49,7 @@ from youtube_workers import YoutubeSearchWorker, ImageLoadWorker
 
 from youtube_worker_ai import GenSparkMultiTabWorker, ImageFXMultiTabWorker, GeminiAPIImageWorker
 from youtube_worker_video import VideoMergerWorker, SingleVideoWorker, VideoDubbingWorker, BatchDubbingWorker, VideoConcatenatorWorkerOld
+from youtube_worker_launcher import BrowserLauncherWorker
 
 class CustomTabWidget(QWidget):
     def __init__(self, parent=None):
@@ -1490,58 +1491,54 @@ class MainApp(QWidget):
             line_edit.setText(path)
 
     def launch_browser_and_tabs(self):
-        try:
-            self.log_display.append("🌐 브라우저를 실행합니다...")
-            chrome_cmd = r'C:\Program Files\Google\Chrome\Application\chrome.exe'
-            user_data = r'C:\sel_chrome'
-            target_url = "https://www.genspark.ai/agents?type=moa_generate_image" 
-            
-            if not os.path.exists(user_data):
-                os.makedirs(user_data)
-                
-            subprocess.Popen([chrome_cmd, '--remote-debugging-port=9222', f'--user-data-dir={user_data}', target_url])
-            
-            # Wait for browser to open
-            time.sleep(3)
-            
-            opt = Options()
-            opt.add_experimental_option("debuggerAddress", "127.0.0.1:9222")
-            self.driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opt)
-            
-            # Ensure 2 tabs
-            if len(self.driver.window_handles) < 2:
-                self.driver.execute_script(f"window.open('{target_url}');")
-                
-            self.log_display.append("✅ 브라우저 연결 성공. 두 개의 탭을 확인하세요.")
+        # UI Freezing Prevented by Worker
+        self.btn_prepare.setEnabled(False)
+        self.status_label.setText("1단계: 브라우저 실행 중...")
+        
+        self.browser_worker = BrowserLauncherWorker('genspark')
+        self.browser_worker.log_signal.connect(self.log_display.append)
+        self.browser_worker.finished.connect(self.on_browser_launch_finished)
+        self.browser_worker.start()
+
+    def on_browser_launch_finished(self, result):
+        driver, error = result
+        self.btn_prepare.setEnabled(True)
+        
+        if driver:
+            self.driver = driver
+            window_count = len(self.driver.window_handles)
+            self.log_display.append(f"✅ 브라우저 연결 성공. 현재 탭 수: {window_count}")
+            if window_count < 2:
+                self.log_display.append("⚠️ 경고: 자동 탭 열기 실패. 수동으로 탭을 열어주세요.")
             self.status_label.setText("2단계: 프롬프트 입력 후 시작 버튼을 누르세요.")
-            
-        except Exception as e:
-            self.log_display.append(f"❌ 브라우저 실행 오류: {e}")
+        else:
+            self.log_display.append(f"❌ 브라우저 실패: {error}")
             self.status_label.setText("오류 발생 (로그 확인)")
 
 
     def launch_browser_imagefx(self):
-        try:
-            self.fx_log_display.append("🌐 ImageFX용 브라우저를 실행합니다...")
-            chrome_cmd = r'C:\Program Files\Google\Chrome\Application\chrome.exe'
-            user_data = r'C:\sel_chrome_fx'
-            target_url = "https://labs.google/fx/ko/tools/image-fx"
-            if not os.path.exists(user_data): os.makedirs(user_data)
-            subprocess.Popen([chrome_cmd, '--remote-debugging-port=9223', f'--user-data-dir={user_data}', target_url])
-            
-            time.sleep(3)
-            opt = Options()
-            opt.add_experimental_option("debuggerAddress", "127.0.0.1:9223")
-            self.driver_fx = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opt)
-            
-            # 2번째 탭
-            if len(self.driver_fx.window_handles) < 2:
-                self.driver_fx.execute_script(f"window.open('{target_url}');")
-            
-            self.fx_log_display.append("✅ ImageFX 준비됨. 로그인 후 시작 버튼을 누르세요.")
+        self.btn_fx_prepare.setEnabled(False)
+        self.fx_status_label.setText("1단계: 브라우저 실행 중...")
+        
+        self.fx_browser_worker = BrowserLauncherWorker('imagefx')
+        self.fx_browser_worker.log_signal.connect(self.fx_log_display.append)
+        self.fx_browser_worker.finished.connect(self.on_fx_browser_launch_finished)
+        self.fx_browser_worker.start()
+
+    def on_fx_browser_launch_finished(self, result):
+        driver, error = result
+        self.btn_fx_prepare.setEnabled(True)
+        
+        if driver:
+            self.driver_fx = driver
+            window_count = len(self.driver_fx.window_handles)
+            self.fx_log_display.append(f"✅ ImageFX 준비됨. (탭: {window_count})")
+            if window_count < 2:
+                self.fx_log_display.append("⚠️ 경고: 자동 탭 열기 실패. 수동으로 탭을 열어주세요.")
             self.fx_status_label.setText("상태: 브라우저 준비됨.")
-        except Exception as e:
-            self.fx_log_display.append(f"❌ 오류: {e}")
+        else:
+            self.fx_log_display.append(f"❌ 오류: {error}")
+            self.fx_status_label.setText("오류 발생")
 
     def start_automation_imagefx(self):
         if not hasattr(self, 'driver_fx') or self.driver_fx is None:
@@ -3506,65 +3503,49 @@ class MainApp(QWidget):
     def initTabGoldPrice(self):
         layout = QVBoxLayout()
         
-        # Model Select Layout
-        model_layout = QHBoxLayout()
-        model_layout.addWidget(QLabel("베이스 영상 선택:"))
-        self.combo_gold_model = QComboBox()
-        self.combo_gold_model.setMinimumWidth(300)
-        model_layout.addWidget(self.combo_gold_model)
+        # Input Folder Selection
+        input_layout = QHBoxLayout()
+        input_layout.addWidget(QLabel("작업 폴더:"))
+        self.txt_gold_input_dir = QLineEdit()
+        self.txt_gold_input_dir.setPlaceholderText("mp4, mp3, json 파일이 있는 폴더를 선택하세요")
+        input_layout.addWidget(self.txt_gold_input_dir)
         
-        # Refresh Button for Models
-        btn_refresh_model = QPushButton("🔄")
-        btn_refresh_model.setFixedSize(30, 30)
-        btn_refresh_model.setToolTip("목록 새로고침")
-        btn_refresh_model.clicked.connect(self.load_gold_models)
-        model_layout.addWidget(btn_refresh_model)
-        
-        layout.addLayout(model_layout)
+        btn_sel_input = QPushButton("폴더 선택")
+        btn_sel_input.clicked.connect(self.select_gold_input_dir)
+        input_layout.addWidget(btn_sel_input)
+        layout.addLayout(input_layout)
 
         btn_layout = QHBoxLayout()
-        # Removed individual buttons
         
-        self.btn_create_gold_video = QPushButton("금시세 생성")
+        self.btn_fetch_price = QPushButton("금은시세")
+        self.btn_fetch_price.setFixedSize(120, 40)
+        self.btn_fetch_price.setStyleSheet("font-weight: bold; background-color: #FF9800; color: white;")
+        self.btn_fetch_price.clicked.connect(self.fetch_gold_price)
+        btn_layout.addWidget(self.btn_fetch_price)
+
+        self.btn_create_gold_video = QPushButton("영상 생성")
         self.btn_create_gold_video.setFixedSize(150, 40)
         self.btn_create_gold_video.setStyleSheet("background-color: #673AB7; color: white; font-weight: bold;")
         self.btn_create_gold_video.clicked.connect(self.create_gold_video)
-        self.btn_create_gold_video.setEnabled(True) # Always enabled, we'll fetch data if needed
         btn_layout.addWidget(self.btn_create_gold_video)
         
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
         
         self.txt_gold_price_result = QTextEdit()
-        self.txt_gold_price_result.setPlaceholderText("금시세 가져오기 버튼을 눌러 데이터를 확인하세요.")
+        self.txt_gold_price_result.setPlaceholderText("1. 금은시세 버튼으로 데이터 확인\n2. 폴더 선택 (mp4, mp3, json)\n3. 영상 생성 버튼 클릭")
         layout.addWidget(self.txt_gold_price_result)
         
         self.tab_gold_price.setLayout(layout)
         
-        self.gold_data = None # Store parsed data here
+        self.gold_data = None 
         self.last_gold_image_path = None
-        
-        # Load models
-        self.load_gold_models()
+        self.gold_worker = None
 
-    def load_gold_models(self):
-        model_dir = r"D:\youtube\shortz\gold_model"
-        if not os.path.exists(model_dir):
-            try:
-                os.makedirs(model_dir)
-            except:
-                pass
-        
-        self.combo_gold_model.clear()
-        if os.path.exists(model_dir):
-            files = [f for f in os.listdir(model_dir) if f.lower().endswith('.mp4')]
-            if files:
-                self.combo_gold_model.addItems(files)
-                self.combo_gold_model.setCurrentIndex(0)
-            else:
-                self.combo_gold_model.addItem("MP4 파일 없음")
-        else:
-            self.combo_gold_model.addItem("폴더 없음")
+    def select_gold_input_dir(self):
+        d = QFileDialog.getExistingDirectory(self, "작업 폴더 선택", r"D:\youtube")
+        if d:
+            self.txt_gold_input_dir.setText(d)
 
     def fetch_gold_price(self):
         try:
@@ -3586,8 +3567,8 @@ class MainApp(QWidget):
                 date_elem = target_div.find('p', class_='pricedate')
                 date_str = date_elem.get_text(strip=True) if date_elem else datetime.now().strftime("%Y-%m-%d")
                 
-                result_text = f"📅 기준일: {date_str}\n"
-                result_text += "=" * 30 + "\n"
+                formatted_date = date_str.replace('-', '.')
+                result_text = f"🌎 국내 시세  - {formatted_date}기준\n"
                 
                 self.gold_data = {
                     'date': date_str,
@@ -3636,37 +3617,78 @@ class MainApp(QWidget):
                         result_text += f"  🔺 살때: {price_buy}원 ({change_buy})\n"
                         result_text += "-" * 30 + "\n"
 
-                # --- 2. International Spot Data (Gold-API) ---
+                # --- 2. International Spot Data (Playwright Scraping sdbullion widget) ---
                 try:
-                    headers = {
-                        'x-access-token': 'goldapi-h0qzsmkjgexce-io',
-                        'Content-Type': 'application/json'
-                    }
+                    from playwright.sync_api import sync_playwright
                     
-                    # 1. Gold (XAU)
-                    gold_url = "https://www.goldapi.io/api/XAU/USD"
-                    resp_gold = requests.get(gold_url, headers=headers, timeout=5)
-                    intl_gold = '-'
-                    if resp_gold.status_code == 200:
-                        # {"price": 2662.5, ...}
-                        intl_gold = resp_gold.json().get('price', '-')
-                        
-                    # 2. Silver (XAG)
-                    silver_url = "https://www.goldapi.io/api/XAG/USD"
-                    resp_silver = requests.get(silver_url, headers=headers, timeout=5)
-                    intl_silver = '-'
-                    if resp_silver.status_code == 200:
-                        intl_silver = resp_silver.json().get('price', '-')
+                    errors = []
+                    
+                    def get_prices_with_playwright():
+                        with sync_playwright() as p:
+                            # Launch headless browser
+                            browser = p.chromium.launch(headless=True)
+                            page = browser.new_page()
+                            
+                            # Direct Widget URL (found via investigation)
+                            # This bypasses the main site wrapper and gives direct access to the ticker HTML
+                            widget_url = "https://widget.nfusionsolutions.com/widget/ticker/1/30d00216-cb7b-4935-b6a2-273d495f1d98/7b9cdfda-d566-4d60-8fff-5c817f87db2b"
+                            try:
+                                page.goto(widget_url, timeout=30000)
+                                page.wait_for_selector('table[data-symbol="gold"]', timeout=10000)
+                            except Exception as e:
+                                errors.append(f"Nav/Wait Error: {str(e)}")
+                                browser.close()
+                                return ('-', '-'), ('-', '-')
+
+                            def extract_data(symbol_key):
+                                try:
+                                    # Locate the table
+                                    table = page.locator(f'table[data-symbol="{symbol_key}"]')
+                                    if not table.count():
+                                        return '-', '-'
+                                    
+                                    # Ask Price
+                                    ask_elem = table.locator('.quote-field.ask .value')
+                                    if not ask_elem.count():
+                                        return '-', '-'
+                                    price_text = ask_elem.inner_text().replace('$', '').replace(',', '').strip()
+                                    curr_price = float(price_text)
+                                    
+                                    # Change Value
+                                    change_elem = table.locator('.quote-field.oneDayChange .value')
+                                    change_text = change_elem.inner_text().replace('$', '').replace(',', '').replace('+', '').strip() if change_elem.count() else '0'
+                                    change_val = float(change_text)
+                                    
+                                    # Calculate Yesterday
+                                    prev_price = curr_price - change_val
+                                    return f"{curr_price:,.2f}", f"{prev_price:,.2f}"
+                                    
+                                except Exception as e:
+                                    errors.append(f"{symbol_key}: {str(e)}")
+                                    return '-', '-'
+
+                            res_gold = extract_data('gold')
+                            res_silver = extract_data('silver')
+                            
+                            browser.close()
+                            return res_gold, res_silver
+
+                    (intl_gold, hist_gold), (intl_silver, hist_silver) = get_prices_with_playwright()
 
                     self.gold_data['international'] = {
-                        'gold': str(intl_gold),
-                        'silver': str(intl_silver),
-                        'time': datetime.now().strftime("%m.%d %H:%M") # Capture fetch time
+                        'gold': intl_gold,
+                        'silver': intl_silver,
+                        'gold_yesterday': hist_gold,
+                        'silver_yesterday': hist_silver,
+                        'time': datetime.now().strftime("%Y.%m.%d %H:%M") 
                     }
                     
-                    result_text += f"\n🌎 국제 시세 (Spot) - {self.gold_data['international']['time']} 기준\n"
-                    result_text += f"  💰 Gold: ${intl_gold}\n"
-                    result_text += f"  🥈 Silver: ${intl_silver}\n"
+                    result_text += f"\n🌎 국제 시세 (SDBullion/Widget) - {self.gold_data['international']['time']} 기준\n"
+                    result_text += f"  💰 Gold: ${intl_gold} (어제: ${hist_gold})\n"
+                    result_text += f"  🥈 Silver: ${intl_silver} (어제: ${hist_silver})\n"
+                    
+                    if errors:
+                        result_text += "\n⚠️ 스크래핑 오류 상세:\n" + "\n".join(errors) + "\n"
                     
                 except Exception as e_spot:
                     result_text += f"\n⚠️ 국제 시세 조회 실패: {e_spot}\n"
@@ -3912,96 +3934,145 @@ class MainApp(QWidget):
             return False
 
     def create_gold_video(self):
-        # 1. Fetch Data
-        if not self.fetch_gold_price():
-            QMessageBox.critical(self, "오류", "금시세 데이터를 가져오는데 실패했습니다.")
-            return
-            
-        # 2. Create Image
-        if not self.create_gold_image():
-            QMessageBox.critical(self, "오류", "이미지 생성에 실패했습니다.")
-            # self.log_signal.emit("❌ 이미지 생성 실패")
-            return
+        # 1. Fetch Price Check
+        if not self.gold_data:
+            if not self.fetch_gold_price():
+                QMessageBox.critical(self, "오류", "금시세 데이터를 먼저 가져와주세요.")
+                return
 
+        # 2. Create Image Check
         if not self.last_gold_image_path or not os.path.exists(self.last_gold_image_path):
-            QMessageBox.warning(self, "오류", "생성된 이미지를 찾을 수 없습니다.")
-            return
-
-        # 1. Base Video from Combo
-        selected_model = self.combo_gold_model.currentText()
-        if not selected_model or selected_model in ["MP4 파일 없음", "폴더 없음"]:
-            QMessageBox.warning(self, "오류", "베이스 영상이 선택되지 않았습니다.")
+             if not self.create_gold_image():
+                return
+        
+        # 3. Input Dir Check
+        if not hasattr(self, 'txt_gold_input_dir'): 
+             QMessageBox.critical(self, "오류", "UI 초기화 오류")
+             return
+        input_dir = self.txt_gold_input_dir.text().strip()
+        if not input_dir or not os.path.exists(input_dir):
+            QMessageBox.warning(self, "오류", "작업 폴더를 선택해주세요.")
             return
             
-        base_video_path = os.path.join(r"D:\youtube\shortz\gold_model", selected_model)
-        if not os.path.exists(base_video_path):
-            QMessageBox.warning(self, "오류", f"베이스 영상 파일이 없습니다:\n{base_video_path}")
-            return
+        # 4. Find Files (mp4, mp3) - JSON is auto-detected by worker
+        try:
+            files = os.listdir(input_dir)
+            mp4_file = next((f for f in files if f.lower().endswith('.mp4')), None)
+            mp3_file = next((f for f in files if f.lower().endswith('.mp3')), None)
+            
+            if not mp4_file:
+                QMessageBox.warning(self, "오류", "폴더에 MP4 영상 파일이 없습니다.")
+                return
+            if not mp3_file:
+                QMessageBox.warning(self, "오류", "폴더에 MP3 오디오 파일이 없습니다.")
+                return
+                
+            base_video_path = os.path.join(input_dir, mp4_file)
+            audio_path = os.path.join(input_dir, mp3_file)
+            
+        except Exception as e:
+             QMessageBox.critical(self, "오류", f"파일 검색 중 오류: {e}")
+             return
 
+        # Output Setup
         output_dir = r"D:\youtube\shortz"
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-
-        timestamp = datetime.now().strftime("%Y%m%d%H%M")
-        output_filename = f"gold_market_price_{timestamp}.mp4"
-        output_path = os.path.join(output_dir, output_filename)
-
-        # FFmpeg Command
-        # Overlay image at bottom (0:H-h)
-        # Inputs: 0: video, 1: image
-        # If image is 1080x960 and video is 1080x1920:
-        # overlay=0:960
-        # Wait, user said "하단 기준으로 이미지가 올라가게 한다". 
-        # If image is shorter than half, it should be at bottom? The image creates is 1080x960 (solid). 
-        # Ideally: overlay=0:H-h
+        if not os.path.exists(output_dir): os.makedirs(output_dir)
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # --- Step 1: Overlay Gold Image on Base Video ---
+        temp_overlay_video = os.path.join(input_dir, f"temp_gold_base_{timestamp}.mp4")
+        
+        self.txt_gold_price_result.append("\n🎬 [1단계] 금시세 이미지 합성 중...")
+        self.log_signal.emit(f"🎬 [1단계] 베이스 영상 생성 시작: {base_video_path}")
+        QApplication.processEvents()
         
         ffmpeg_exe = os.path.join(os.getcwd(), "ffmpeg_bin", "ffmpeg.exe")
-        if not os.path.exists(ffmpeg_exe):
-            # Fallback to system ffmpeg if local not found, though unlikely given the error
-            ffmpeg_exe = "ffmpeg"
-
+        if not os.path.exists(ffmpeg_exe): ffmpeg_exe = "ffmpeg"
+        
+        # Filter: Scale Video to 1080x1920 -> Overlay Image
+        # Note: Previous step modified this filter. We reuse it here.
         cmd = [
             ffmpeg_exe, "-y",
             "-i", base_video_path,
             "-i", self.last_gold_image_path,
-            "-filter_complex", "[0:v][1:v]overlay=0:H-h[outv]",
+            "-filter_complex", "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[v0];[v0][1:v]overlay=0:0[outv]",
             "-map", "[outv]",
-            "-map", "0:a?", # Map audio if exists in base video, ? makes it optional
-            "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "23",
+            "-map", "0:a?", 
+            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
             "-c:a", "copy",
-            output_path
+            temp_overlay_video
         ]
-
-        self.log_signal.emit(f"🎬 영상 생성 시작: {output_path}")
-        self.txt_gold_price_result.append(f"\n🎬 영상 생성 중...\n{output_path}")
-        
-        # Use a thread or process to prevent UI freeze? For now, run synchronously or use QProcess is better, 
-        # but to keep it simple and given I have to impl logic here:
-        # Subprocess run is blocking. If video is short, it's okay. model_v1.mp4 length unknown.
-        # Assuming it's short (Shorts).
         
         try:
-            # Creation flags for hiding console window on Windows
             creation_flags = 0x08000000 if os.name == 'nt' else 0
-            
             subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=creation_flags)
-            
-            self.log_signal.emit(f"✅ 영상 생성 완료: {output_path}")
-            self.txt_gold_price_result.append(f"✅ 생성 완료!")
-            
-            QMessageBox.information(self, "완료", f"영상이 생성되었습니다:\n{output_path}")
-            # Open folder
-            os.startfile(output_dir)
-            
+            self.log_signal.emit("✅ [1단계] 이미지 합성 완료.")
         except subprocess.CalledProcessError as e:
-            err_msg = e.stderr.decode('utf-8', errors='ignore') if e.stderr else str(e)
-            self.log_signal.emit(f"❌ FFmpeg 오류: {err_msg}")
-            QMessageBox.critical(self, "인코딩 오류", f"FFmpeg 오류가 발생했습니다.\n{err_msg[-500:]}")
+            err = e.stderr.decode('utf-8') if e.stderr else str(e)
+            QMessageBox.critical(self, "오류", f"1단계 영상 생성 실패:\n{err[-300:]}")
+            self.log_signal.emit(f"❌ 1단계 실패: {err}")
+            return
+
+        # --- Step 2: Merge Overlay-Video + MP3 + Subtitles ---
+        self.txt_gold_price_result.append("🎬 [2단계] 자막 및 오디오 합성 중...")
+        self.log_signal.emit("🎬 [2단계] 자막/오디오 합성 작업을 시작합니다.")
+        QApplication.processEvents()
+        
+        final_output_path = os.path.join(output_dir, f"Gold_Shorts_{timestamp}.mp4")
+        
+        # Style (Default - Malgun Gothic, 70px White with Black Outline)
+        style = {
+            "font_family": "Malgun Gothic",
+            "font_size": 70,
+            "text_color": "#FFFFFF",
+            "outline_color": "#000000",
+            "bg_color": "Transparent",
+            "use_outline": True,
+            "use_bg": False
+        }
+        
+        try:
+            from youtube_worker_video import SingleVideoWorker
+            
+            # Note: We pass the 'temp_overlay_video' as the 'img_path'. 
+            self.gold_worker = SingleVideoWorker(
+                img_path=temp_overlay_video,
+                audio_path=audio_path,
+                output_path=final_output_path,
+                subtitles=None, # Worker auto-detects JSON by audio filename
+                style=style,
+                volume=1.0,
+                trim_end=0.0,
+                is_shorts=True
+            )
+            
+            self.gold_worker.log_signal.connect(self.log_signal.emit)
+            self.gold_worker.finished.connect(lambda msg, t: self.on_gold_video_finished(msg, final_output_path, temp_overlay_video))
+            self.gold_worker.error.connect(lambda err: QMessageBox.critical(self, "오류", f"2단계 작업 실패: {err}"))
+            
+            self.gold_worker.start()
+            
+            # Disable button during processing
+            self.btn_create_gold_video.setEnabled(False)
+            
         except Exception as e:
-            self.log_signal.emit(f"❌ 오류: {e}")
-            QMessageBox.critical(self, "오류", f"작업 중 오류 발생: {e}")
+            QMessageBox.critical(self, "오류", f"워커 시작 실패: {e}")
+
+    def on_gold_video_finished(self, msg, output_path, temp_path):
+        self.txt_gold_price_result.append(f"✅ 모든 작업 완료!\n저장위치: {output_path}")
+        self.log_signal.emit(f"✅ 최종 완료: {msg}")
+        self.btn_create_gold_video.setEnabled(True)
+        QMessageBox.information(self, "성공", f"영상 생성이 완료되었습니다.\n{output_path}")
+        
+        # Clean up temp
+        if os.path.exists(temp_path):
+            try: os.remove(temp_path)
+            except: pass
+            
+        try:
+            os.startfile(os.path.dirname(output_path))
+        except: pass
 
 
 class BatchVideoEffectWorker(VideoMergerWorker):

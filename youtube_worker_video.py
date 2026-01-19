@@ -31,7 +31,7 @@ class VideoMergerWorker(QThread):
     finished = pyqtSignal(str, float)
     error = pyqtSignal(str)
 
-    def __init__(self, image_dir, audio_dir, output_dir, subtitles=None, style=None, volume=1.0, trim_end=0.0, use_random_effects=False):
+    def __init__(self, image_dir, audio_dir, output_dir, subtitles=None, style=None, volume=1.0, trim_end=0.0, use_random_effects=False, is_shorts=False):
         super().__init__()
         self.image_dir = image_dir
         self.audio_dir = audio_dir
@@ -41,6 +41,8 @@ class VideoMergerWorker(QThread):
         self.volume = volume
         self.trim_end = trim_end
         self.use_random_effects = use_random_effects
+        self.is_shorts = is_shorts
+        self.target_size = (1080, 1920) if is_shorts else (1920, 1080)
         os.makedirs(self.output_dir, exist_ok=True)
 
     def run(self):
@@ -252,8 +254,9 @@ class VideoMergerWorker(QThread):
             subtitle_inputs = [] # (path, start_t, end_t)
             
             # 이미지 사이즈 확인 (자막 생성을 위해)
-            # [Fix] 자막은 최종 영상 해상도(1920x1080) 기준으로 생성해야 오버레이 좌표가 맞음
-            TARGET_W, TARGET_H = 1920, 1080
+            # 이미지 사이즈 확인 (자막 생성을 위해)
+            # [Fix] 자막은 최종 영상 해상도 기준으로 생성해야 오버레이 좌표가 맞음
+            TARGET_W, TARGET_H = self.target_size
             w, h = TARGET_W, TARGET_H
             
             # 자막 PNG 생성
@@ -391,10 +394,17 @@ class VideoMergerWorker(QThread):
             # 4. FFmpeg 명령어 구성
             command = [ffmpeg_exe, "-y", "-fflags", "+genpts"]
             
-            # [Input 0] 배경 이미지 (Loop, Concat, or Black)
+            # [Input 0] 배경 이미지 (Loop, Concat, or Black) OR 배경 비디오
             FPS = 30
+            is_video_input = False
+            if img_path and img_path.lower().endswith('.mp4'):
+                is_video_input = True
+                
             if final_img_concat_path:
                 command.extend(["-f", "concat", "-safe", "0", "-i", final_img_concat_path])
+            elif is_video_input and os.path.exists(img_path):
+                 # Video Input Mode: Loop infinitely, will be trimmed by -t at output
+                 command.extend(["-stream_loop", "-1", "-i", img_path])
             elif img_path and os.path.exists(img_path) and img_path != "MULTI_IMAGE_MODE":
                 command.extend(["-loop", "1", "-t", f"{final_duration:.6f}", "-i", img_path])
             else:
@@ -458,6 +468,16 @@ class VideoMergerWorker(QThread):
             if final_img_concat_path:
                 # Concat 모드
                 filter_parts.append(f"[0:v]fps={FPS},scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=decrease,pad={TARGET_W}:{TARGET_H}:(ow-iw)/2:(oh-ih)/2,setsar=1:1[v_bg]")
+            elif is_video_input:
+                # Video Input Mode: Scale and Crop to Fill 1080x1920 (Shorts)
+                # Ensure it fills the screen (increase) then crop
+                filter_parts.append(f"[0:v]fps={FPS},scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=idea,crop={TARGET_W}:{TARGET_H},setsar=1:1[v_bg]")
+                # Using 'idea' isn't standard in ffmpeg scale? standardized: 'increase' then crop
+                # Correct logic: scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920
+                # Overwriting previous line logic
+                filter_parts.pop() 
+                filter_parts.append(f"[0:v]fps={FPS},scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=increase,crop={TARGET_W}:{TARGET_H},setsar=1:1[v_bg]")
+
             elif img_path and os.path.exists(img_path) and img_path != "MULTI_IMAGE_MODE":
                 # Effect Config (Zoom/Pan)
                 # [Anti-Jitter] 8K(7680x4320) Ultra-Supersampling
@@ -526,6 +546,8 @@ class VideoMergerWorker(QThread):
             # Encoding Options
             command.extend(["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p"])
             command.extend(["-c:a", "aac", "-b:a", "192k"])
+            # Strictly limit output duration to audio length
+            command.extend(["-t", f"{final_duration:.6f}"])
             command.extend(["-y", output_path])
             
             if effect_config:
@@ -735,10 +757,18 @@ class VideoMergerWorker(QThread):
         bg_rect = text_rect.adjusted(-padding_h, -padding_v, padding_h, padding_v)
         
         box_h = bg_rect.height()
-        target_bottom = height - margin_bottom
-        target_top = target_bottom - box_h
         
-        dy = target_top - bg_rect.top()
+        if getattr(self, 'is_shorts', False):
+            # Shorts: Center + Offset (Avoid overlapping center face or bottom UI)
+            # Center Y = height / 2. Move down by 20% of height.
+            target_cy = (height / 2) + (height * 0.20)
+            target_top = target_cy - (box_h / 2)
+        else:
+            # Landscape: Bottom
+            target_bottom = height - margin_bottom
+            target_top = target_bottom - box_h
+        
+        dy = int(target_top - bg_rect.top())
         bg_rect.translate(0, dy)
         text_rect.translate(0, dy)
 
@@ -790,9 +820,9 @@ class VideoMergerWorker(QThread):
         return arr
 
 class SingleVideoWorker(VideoMergerWorker):
-    def __init__(self, img_path, audio_path, output_path, subtitles=None, style=None, volume=1.0, trim_end=0.0, effect_config=None):
+    def __init__(self, img_path, audio_path, output_path, subtitles=None, style=None, volume=1.0, trim_end=0.0, effect_config=None, is_shorts=False):
         super().__init__(os.path.dirname(img_path), os.path.dirname(audio_path), os.path.dirname(output_path), 
-                         subtitles=None, style=style, volume=volume, trim_end=trim_end)
+                         subtitles=None, style=style, volume=volume, trim_end=trim_end, is_shorts=is_shorts)
         self.single_img = img_path
         self.single_audio = audio_path
         self.single_output = output_path
