@@ -48,6 +48,7 @@ from youtube_workers import YoutubeSearchWorker, ImageLoadWorker
 
 
 from youtube_worker_ai import GenSparkMultiTabWorker, ImageFXMultiTabWorker, GeminiAPIImageWorker
+from youtube_worker_launcher import BrowserLauncherWorker
 from youtube_worker_video import VideoMergerWorker, SingleVideoWorker, VideoDubbingWorker, BatchDubbingWorker, VideoConcatenatorWorkerOld
 
 class CustomTabWidget(QWidget):
@@ -1490,33 +1491,33 @@ class MainApp(QWidget):
             line_edit.setText(path)
 
     def launch_browser_and_tabs(self):
-        try:
-            self.log_display.append("🌐 브라우저를 실행합니다...")
-            chrome_cmd = r'C:\Program Files\Google\Chrome\Application\chrome.exe'
-            user_data = r'C:\sel_chrome'
-            target_url = "https://www.genspark.ai/agents?type=moa_generate_image" 
-            
-            if not os.path.exists(user_data):
-                os.makedirs(user_data)
+        # UI Freezing Prevented by Worker
+        self.btn_prepare.setEnabled(False)
+        self.status_label.setText("1단계: 브라우저 실행 중...")
+        self.log_display.append("⏳ 브라우저 실행 프로세스 시작...")
+        
+        self.browser_worker = BrowserLauncherWorker('genspark')
+        self.browser_worker.log_signal.connect(self.log_display.append)
+        self.browser_worker.finished.connect(self.on_browser_launch_finished)
+        self.browser_worker.start()
+
+    def on_browser_launch_finished(self, result):
+        driver, error = result
+        self.btn_prepare.setEnabled(True)
+        
+        if driver:
+            self.driver = driver
+            try:
+                window_count = len(self.driver.window_handles)
+            except:
+                window_count = "?"
                 
-            subprocess.Popen([chrome_cmd, '--remote-debugging-port=9222', f'--user-data-dir={user_data}', target_url])
-            
-            # Wait for browser to open
-            time.sleep(3)
-            
-            opt = Options()
-            opt.add_experimental_option("debuggerAddress", "127.0.0.1:9222")
-            self.driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opt)
-            
-            # Ensure 2 tabs
-            if len(self.driver.window_handles) < 2:
-                self.driver.execute_script(f"window.open('{target_url}');")
-                
-            self.log_display.append("✅ 브라우저 연결 성공. 두 개의 탭을 확인하세요.")
+            self.log_display.append(f"✅ 브라우저 연결 성공. 현재 탭 수: {window_count}")
+            if isinstance(window_count, int) and window_count < 2:
+                self.log_display.append("⚠️ 경고: 자동 탭 열기 실패. 수동으로 탭을 열어주세요.")
             self.status_label.setText("2단계: 프롬프트 입력 후 시작 버튼을 누르세요.")
-            
-        except Exception as e:
-            self.log_display.append(f"❌ 브라우저 실행 오류: {e}")
+        else:
+            self.log_display.append(f"❌ 브라우저 실패: {error}")
             self.status_label.setText("오류 발생 (로그 확인)")
 
 
