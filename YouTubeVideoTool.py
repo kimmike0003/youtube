@@ -179,7 +179,7 @@ class MainApp(QWidget):
         # 5. Video Dubbing
         self.tab6 = QWidget()
         self.initTab6()
-        self.tabs.addTab(self.tab6, "동영상+자막")
+        self.tabs.addTab(self.tab6, "그록동영상")
 
         # 6. Video Effects
         self.tab5 = QWidget()
@@ -216,7 +216,7 @@ class MainApp(QWidget):
         # 12. Video List
         self.tab_video_list = QWidget()
         self.initTabVideoList()
-        self.tabs.addTab(self.tab_video_list, "영상목록")
+        self.tabs.addTab(self.tab_video_list, "영상관리")
 
         # 13. Prompt
         self.tab_prompt = QWidget()
@@ -226,7 +226,7 @@ class MainApp(QWidget):
         # 14. Gold Price Shorts
         self.tab_gold_price = QWidget()
         self.initTabGoldPrice()
-        self.tabs.addTab(self.tab_gold_price, "금시세숏츠")
+        self.tabs.addTab(self.tab_gold_price, "금시세")
 
 
 
@@ -2757,27 +2757,7 @@ class MainApp(QWidget):
         # Form Buttons
         btn_form_layout = QHBoxLayout()
         
-        # Copy Buttons
-        btn_copy_script = QPushButton("Script Copy")
-        btn_copy_script.setFixedSize(120, 30)
-        btn_copy_script.clicked.connect(lambda: self.copy_to_clipboard(self.input_script))
-        btn_form_layout.addWidget(btn_copy_script)
-
-        btn_copy_img = QPushButton("Image Copy")
-        btn_copy_img.setFixedSize(120, 30)
-        btn_copy_img.clicked.connect(lambda: self.copy_to_clipboard(self.input_img_script))
-        btn_form_layout.addWidget(btn_copy_img)
-        
-        btn_copy_tts = QPushButton("TTS Copy")
-        btn_copy_tts.setFixedSize(120, 30)
-        btn_copy_tts.clicked.connect(lambda: self.copy_to_clipboard(self.input_tts_text))
-        btn_form_layout.addWidget(btn_copy_tts)
-        
-        btn_copy_desc = QPushButton("Desc Copy")
-        btn_copy_desc.setFixedSize(120, 30)
-        btn_copy_desc.clicked.connect(lambda: self.copy_to_clipboard(self.input_description))
-        btn_form_layout.addWidget(btn_copy_desc)
-
+        # Copy Buttons Removed
         btn_form_layout.addStretch() # Right alignment
         
         self.btn_cancel_form = QPushButton("목록")
@@ -2942,7 +2922,10 @@ class MainApp(QWidget):
             conn.close()
             
             QMessageBox.information(self, "성공", msg)
-            self.show_list_view()
+            
+            # 신규 등록일 때만 목록으로 이동 (수정 시에는 유지)
+            if self.current_video_id is None:
+                self.show_list_view()
             
         except Exception as e:
             QMessageBox.critical(self, "저장 오류", f"DB 저장 중 오류 발생:\n{e}")
@@ -3553,14 +3536,15 @@ class MainApp(QWidget):
             from bs4 import BeautifulSoup
             import requests
             
+            # --- 1. Domestic Data (Scraping) ---
             url = "https://www.kumsise.com/main/index.php"
             response = requests.get(url)
             response.raise_for_status()
             
             soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # Find the specific div
             target_div = soup.find('div', class_='korGold_price')
+            
+            domestic_text = ""
             
             if target_div:
                 # 1. Date
@@ -3568,7 +3552,7 @@ class MainApp(QWidget):
                 date_str = date_elem.get_text(strip=True) if date_elem else datetime.now().strftime("%Y-%m-%d")
                 
                 formatted_date = date_str.replace('-', '.')
-                result_text = f"🌎 국내 시세  - {formatted_date}기준\n"
+                domestic_text = f"🌎 국내 시세  - {formatted_date} 기준\n"
                 
                 self.gold_data = {
                     'date': date_str,
@@ -3612,69 +3596,77 @@ class MainApp(QWidget):
                             'buy_change': change_buy
                         })
                         
-                        result_text += f"🏷️ {item_name}\n"
-                        result_text += f"  🔻 팔때: {price_sell}원 ({change_sell})\n"
-                        result_text += f"  🔺 살때: {price_buy}원 ({change_buy})\n"
-                        result_text += "-" * 30 + "\n"
+                        domestic_text += f"🏷️ {item_name}\n"
+                        dct_sell = f" ({change_sell})" if change_sell else ""
+                        domestic_text += f"  🔻 팔때: {price_sell}원{dct_sell}\n"
+                        dct_buy = f" ({change_buy})" if change_buy else ""
+                        domestic_text += f"  🔺 살때: {price_buy}원{dct_buy}\n"
+                        domestic_text += "-" * 30 + "\n"
+            else:
+                domestic_text = "지정된 요소(<div class='korGold_price'>)를 찾을 수 없습니다."
+                self.log_signal.emit("⚠️ 금시세 요소를 찾을 수 없습니다.")
+                return False
 
-                # --- 2. International Spot Data (Playwright Scraping sdbullion widget) ---
-                try:
-                    from playwright.sync_api import sync_playwright
-                    
-                    errors = []
-                    
-                    def get_prices_with_playwright():
-                        with sync_playwright() as p:
-                            # Launch headless browser
-                            browser = p.chromium.launch(headless=True)
-                            page = browser.new_page()
-                            
-                            # Direct Widget URL (found via investigation)
-                            # This bypasses the main site wrapper and gives direct access to the ticker HTML
-                            widget_url = "https://widget.nfusionsolutions.com/widget/ticker/1/30d00216-cb7b-4935-b6a2-273d495f1d98/7b9cdfda-d566-4d60-8fff-5c817f87db2b"
-                            try:
-                                page.goto(widget_url, timeout=30000)
-                                page.wait_for_selector('table[data-symbol="gold"]', timeout=10000)
-                            except Exception as e:
-                                errors.append(f"Nav/Wait Error: {str(e)}")
-                                browser.close()
-                                return ('-', '-'), ('-', '-')
-
-                            def extract_data(symbol_key):
-                                try:
-                                    # Locate the table
-                                    table = page.locator(f'table[data-symbol="{symbol_key}"]')
-                                    if not table.count():
-                                        return '-', '-'
-                                    
-                                    # Ask Price
-                                    ask_elem = table.locator('.quote-field.ask .value')
-                                    if not ask_elem.count():
-                                        return '-', '-'
-                                    price_text = ask_elem.inner_text().replace('$', '').replace(',', '').strip()
-                                    curr_price = float(price_text)
-                                    
-                                    # Change Value
-                                    change_elem = table.locator('.quote-field.oneDayChange .value')
-                                    change_text = change_elem.inner_text().replace('$', '').replace(',', '').replace('+', '').strip() if change_elem.count() else '0'
-                                    change_val = float(change_text)
-                                    
-                                    # Calculate Yesterday
-                                    prev_price = curr_price - change_val
-                                    return f"{curr_price:,.2f}", f"{prev_price:,.2f}"
-                                    
-                                except Exception as e:
-                                    errors.append(f"{symbol_key}: {str(e)}")
-                                    return '-', '-'
-
-                            res_gold = extract_data('gold')
-                            res_silver = extract_data('silver')
-                            
+            # --- 2. International Spot Data (Playwright Scraping sdbullion widget) ---
+            international_text = ""
+            try:
+                from playwright.sync_api import sync_playwright
+                
+                errors = []
+                
+                def get_prices_with_playwright():
+                    with sync_playwright() as p:
+                        # Launch headless browser
+                        browser = p.chromium.launch(headless=True)
+                        page = browser.new_page()
+                        
+                        # Direct Widget URL (found via investigation)
+                        # This bypasses the main site wrapper and gives direct access to the ticker HTML
+                        widget_url = "https://widget.nfusionsolutions.com/widget/ticker/1/30d00216-cb7b-4935-b6a2-273d495f1d98/7b9cdfda-d566-4d60-8fff-5c817f87db2b"
+                        try:
+                            page.goto(widget_url, timeout=30000)
+                            page.wait_for_selector('table[data-symbol="gold"]', timeout=10000)
+                        except Exception as e:
+                            errors.append(f"Nav/Wait Error: {str(e)}")
                             browser.close()
-                            return res_gold, res_silver
+                            return ('-', '-'), ('-', '-')
 
-                    (intl_gold, hist_gold), (intl_silver, hist_silver) = get_prices_with_playwright()
+                        def extract_data(symbol_key):
+                            try:
+                                # Locate the table
+                                table = page.locator(f'table[data-symbol="{symbol_key}"]')
+                                if not table.count():
+                                    return '-', '-'
+                                
+                                # Ask Price
+                                ask_elem = table.locator('.quote-field.ask .value')
+                                if not ask_elem.count():
+                                    return '-', '-'
+                                price_text = ask_elem.inner_text().replace('$', '').replace(',', '').strip()
+                                curr_price = float(price_text)
+                                
+                                # Change Value
+                                change_elem = table.locator('.quote-field.oneDayChange .value')
+                                change_text = change_elem.inner_text().replace('$', '').replace(',', '').replace('+', '').strip() if change_elem.count() else '0'
+                                change_val = float(change_text)
+                                
+                                # Calculate Yesterday
+                                prev_price = curr_price - change_val
+                                return f"{curr_price:,.2f}", f"{prev_price:,.2f}"
+                                
+                            except Exception as e:
+                                errors.append(f"{symbol_key}: {str(e)}")
+                                return '-', '-'
 
+                        res_gold = extract_data('gold')
+                        res_silver = extract_data('silver')
+                        
+                        browser.close()
+                        return res_gold, res_silver
+
+                (intl_gold, hist_gold), (intl_silver, hist_silver) = get_prices_with_playwright()
+
+                if self.gold_data:
                     self.gold_data['international'] = {
                         'gold': intl_gold,
                         'silver': intl_silver,
@@ -3682,25 +3674,22 @@ class MainApp(QWidget):
                         'silver_yesterday': hist_silver,
                         'time': datetime.now().strftime("%Y.%m.%d %H:%M") 
                     }
-                    
-                    result_text += f"\n🌎 국제 시세 (SDBullion/Widget) - {self.gold_data['international']['time']} 기준\n"
-                    result_text += f"  💰 Gold: ${intl_gold} (어제: ${hist_gold})\n"
-                    result_text += f"  🥈 Silver: ${intl_silver} (어제: ${hist_silver})\n"
-                    
-                    if errors:
-                        result_text += "\n⚠️ 스크래핑 오류 상세:\n" + "\n".join(errors) + "\n"
-                    
-                except Exception as e_spot:
-                    result_text += f"\n⚠️ 국제 시세 조회 실패: {e_spot}\n"
+                
+                international_text += f"🌎 국제 시세 (SDBullion/Widget) - {self.gold_data['international']['time']} 기준\n"
+                international_text += f"  💰 Gold: ${intl_gold} (어제: ${hist_gold})\n"
+                international_text += f"  🥈 Silver: ${intl_silver} (어제: ${hist_silver})\n"
+                
+                if errors:
+                    international_text += "\n⚠️ 스크래핑 오류 상세:\n" + "\n".join(errors) + "\n"
+                
+            except Exception as e_spot:
+                international_text += f"\n⚠️ 국제 시세 조회 실패: {e_spot}\n"
 
-                self.txt_gold_price_result.setText(result_text)
-                # self.btn_create_gold_image.setEnabled(True) # Removed
-                self.log_signal.emit("✅ 금시세 데이터를 성공적으로 가져왔습니다.")
-                return True
-            else:
-                self.txt_gold_price_result.setText("지정된 요소(<div class='korGold_price'>)를 찾을 수 없습니다.")
-                self.log_signal.emit("⚠️ 금시세 요소를 찾을 수 없습니다.")
-                return False
+            # --- 3. Combine Results (International FIRST, then Domestic) ---
+            final_text = international_text + "\n" + domestic_text
+            self.txt_gold_price_result.setText(final_text)
+            self.log_signal.emit("✅ 금시세 데이터를 성공적으로 가져왔습니다.")
+            return True
                 
         except Exception as e:
             self.txt_gold_price_result.setText(f"오류 발생: {e}")
