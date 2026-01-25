@@ -2733,23 +2733,30 @@ class MainApp(QWidget):
         self.input_description.setMinimumHeight(100)
 
         # Fields Layout
-        input_layout.addWidget(QLabel("채널:"), 0, 0)
-        input_layout.addWidget(self.combo_channel, 0, 1)
+        # ID Display
+        self.lbl_id_display = QLabel("신규")
+        self.lbl_id_display.setStyleSheet("font-weight: bold; color: #00bcd4; font-size: 14px;")
 
-        input_layout.addWidget(QLabel("제목:"), 1, 0)
-        input_layout.addWidget(self.input_title, 1, 1)
-        
-        input_layout.addWidget(QLabel("대본:"), 2, 0, Qt.AlignTop)
-        input_layout.addWidget(self.input_script, 2, 1)
-        
-        input_layout.addWidget(QLabel("이미지 스크립트:"), 3, 0, Qt.AlignTop)
-        input_layout.addWidget(self.input_img_script, 3, 1)
-        
-        input_layout.addWidget(QLabel("TTS 텍스트:"), 4, 0, Qt.AlignTop)
-        input_layout.addWidget(self.input_tts_text, 4, 1)
+        input_layout.addWidget(QLabel("ID:"), 0, 0)
+        input_layout.addWidget(self.lbl_id_display, 0, 1)
 
-        input_layout.addWidget(QLabel("설명:"), 5, 0, Qt.AlignTop)
-        input_layout.addWidget(self.input_description, 5, 1)
+        input_layout.addWidget(QLabel("채널:"), 1, 0)
+        input_layout.addWidget(self.combo_channel, 1, 1)
+
+        input_layout.addWidget(QLabel("제목:"), 2, 0)
+        input_layout.addWidget(self.input_title, 2, 1)
+        
+        input_layout.addWidget(QLabel("대본:"), 3, 0, Qt.AlignTop)
+        input_layout.addWidget(self.input_script, 3, 1)
+        
+        input_layout.addWidget(QLabel("이미지 스크립트:"), 4, 0, Qt.AlignTop)
+        input_layout.addWidget(self.input_img_script, 4, 1)
+        
+        input_layout.addWidget(QLabel("TTS 텍스트:"), 5, 0, Qt.AlignTop)
+        input_layout.addWidget(self.input_tts_text, 5, 1)
+
+        input_layout.addWidget(QLabel("설명:"), 6, 0, Qt.AlignTop)
+        input_layout.addWidget(self.input_description, 6, 1)
         
         form_group.setLayout(input_layout)
         form_wrapper.addWidget(form_group)
@@ -2770,6 +2777,14 @@ class MainApp(QWidget):
         self.btn_save_video.clicked.connect(self.save_video_data)
         
         btn_form_layout.addWidget(self.btn_cancel_form)
+        
+        self.btn_delete_video = QPushButton("삭제")
+        self.btn_delete_video.setFixedSize(120, 30)
+        self.btn_delete_video.setStyleSheet("font-weight: bold; background-color: #dc3545; color: white; border-radius: 5px;")
+        self.btn_delete_video.clicked.connect(self.delete_video_data)
+        self.btn_delete_video.setVisible(False) # 기본은 숨김 (신규 등록 시)
+
+        btn_form_layout.addWidget(self.btn_delete_video)
         btn_form_layout.addWidget(self.btn_save_video)
         
         form_wrapper.addLayout(btn_form_layout)
@@ -2831,13 +2846,16 @@ class MainApp(QWidget):
         self.input_img_script.clear()
         self.input_tts_text.clear()
         self.input_description.clear()
+        self.lbl_id_display.setText("신규")
         
         if video_id is None:
             # Create Mode
             self.btn_save_video.setText("저장")
+            self.btn_delete_video.setVisible(False)
         else:
             # Edit Mode - Fetch Data
             self.btn_save_video.setText("수정")
+            self.btn_delete_video.setVisible(True)
             self.load_video_detail(video_id)
             
         self.video_list_stack.setCurrentIndex(1)
@@ -2855,6 +2873,7 @@ class MainApp(QWidget):
             conn.close()
             
             if row:
+                self.lbl_id_display.setText(str(row['id']))
                 # Set Channel
                 channel_id = row['channel_id']
                 index = self.combo_channel.findData(channel_id)
@@ -2930,6 +2949,31 @@ class MainApp(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "저장 오류", f"DB 저장 중 오류 발생:\n{e}")
             self.log_signal.emit(f"DB 저장 오류: {e}")
+
+    def delete_video_data(self):
+        if not self.current_video_id:
+            return
+
+        reply = QMessageBox.question(self, '삭제 확인', 
+                                     f"정말로 삭제하시겠습니까? (ID: {self.current_video_id})", 
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+
+        if reply == QMessageBox.Yes:
+            try:
+                if not getattr(self, 'tts_client', None):
+                     self.tts_client = ElevenLabsClient()
+                conn = self.tts_client.get_db_connection()
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM video WHERE id = %s", (self.current_video_id,))
+                conn.commit()
+                cursor.close()
+                conn.close()
+                
+                QMessageBox.information(self, "삭제 완료", "삭제되었습니다.")
+                self.show_list_view()
+                
+            except Exception as e:
+                QMessageBox.critical(self, "오류", f"삭제 중 오류 발생: {e}")
 
     def load_video_list(self):
         try:
