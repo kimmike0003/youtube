@@ -2080,7 +2080,7 @@ class MainApp(QWidget):
 
         # Search Query
         self.edit_yt_query = QLineEdit()
-        self.edit_yt_query.setPlaceholderText("검색어 입력")
+        self.edit_yt_query.setPlaceholderText("검색어 입력 (채널명 포함)")
         self.edit_yt_query.returnPressed.connect(self.start_youtube_search)
         
         self.btn_yt_search = QPushButton("검색")
@@ -2098,9 +2098,9 @@ class MainApp(QWidget):
         
         # 2. Result Table
         self.table_youtube = QTableWidget()
-        self.table_youtube.setColumnCount(13)
+        self.table_youtube.setColumnCount(14)
         self.table_youtube.setHorizontalHeaderLabels([
-            "번호", "썸네일", "채널명", "제목", "조회수", "구독자", "조회수/구독자", "영상길이", "영상수", "기본언어", "오디오언어", "채널국가", "업로드날짜"
+            "번호", "썸네일", "채널명", "카테고리", "제목", "조회수", "구독자", "조회수/구독자", "영상길이", "영상수", "기본언어", "오디오언어", "채널국가", "업로드날짜"
         ])
         
         # Style
@@ -2203,17 +2203,20 @@ class MainApp(QWidget):
             chan_item = make_item(row['channel_name'], Qt.AlignLeft | Qt.AlignVCenter)
             chan_item.setData(Qt.UserRole, row.get('channel_id')) # Store Channel ID
             self.table_youtube.setItem(r, 2, chan_item)
+
+            # 3: Category (Center) [New]
+            self.table_youtube.setItem(r, 3, make_item(row.get('category', '-'), Qt.AlignCenter))
             
-            # 3: Title (Left)
-            self.table_youtube.setItem(r, 3, make_item(row['title'], Qt.AlignLeft | Qt.AlignVCenter))
+            # 4: Title (Left)
+            self.table_youtube.setItem(r, 4, make_item(row['title'], Qt.AlignLeft | Qt.AlignVCenter))
             
-            # 4: Views (Right) - Numeric
-            self.table_youtube.setItem(r, 4, make_numeric_item(f"{row['view_count']:,}", Qt.AlignRight | Qt.AlignVCenter))
+            # 5: Views (Right) - Numeric
+            self.table_youtube.setItem(r, 5, make_numeric_item(f"{row['view_count']:,}", Qt.AlignRight | Qt.AlignVCenter))
             
-            # 5: Subs (Right) - Numeric
-            self.table_youtube.setItem(r, 5, make_numeric_item(f"{row['subscriber_count']:,}", Qt.AlignRight | Qt.AlignVCenter))
+            # 6: Subs (Right) - Numeric
+            self.table_youtube.setItem(r, 6, make_numeric_item(f"{row['subscriber_count']:,}", Qt.AlignRight | Qt.AlignVCenter))
             
-            # 6: Ratio (Right) [New] - Numeric
+            # 7: Ratio (Right) [New] - Numeric
             ratio = 0
             if row['subscriber_count'] > 0:
                 ratio = (row['view_count'] / row['subscriber_count']) * 100
@@ -2230,26 +2233,26 @@ class MainApp(QWidget):
                 ratio_color = QColor("#2196F3") # Blue
                 ratio_font = QFont("Arial", 9, QFont.Bold)
                  
-            self.table_youtube.setItem(r, 6, make_numeric_item(ratio_text, Qt.AlignRight | Qt.AlignVCenter, ratio_color, ratio_font))
+            self.table_youtube.setItem(r, 7, make_numeric_item(ratio_text, Qt.AlignRight | Qt.AlignVCenter, ratio_color, ratio_font))
 
-            # 7: Duration (Center) - Moved here
-            self.table_youtube.setItem(r, 7, make_item(row.get('duration_str', '-'), Qt.AlignCenter))
+            # 8: Duration (Center) - Moved here
+            self.table_youtube.setItem(r, 8, make_item(row.get('duration_str', '-'), Qt.AlignCenter))
 
-            # 8: Video Total (Center) - Numeric
-            self.table_youtube.setItem(r, 8, make_numeric_item(f"{row['video_total']:,}", Qt.AlignCenter))
+            # 9: Video Total (Center) - Numeric
+            self.table_youtube.setItem(r, 9, make_numeric_item(f"{row['video_total']:,}", Qt.AlignCenter))
             
-            # 9: Lang (Center)
-            self.table_youtube.setItem(r, 9, make_item(row['lang'], Qt.AlignCenter))
+            # 10: Lang (Center)
+            self.table_youtube.setItem(r, 10, make_item(row['lang'], Qt.AlignCenter))
             
-            # 10: Audio Lang (Center)
-            self.table_youtube.setItem(r, 10, make_item(row['audio_lang'], Qt.AlignCenter))
+            # 11: Audio Lang (Center)
+            self.table_youtube.setItem(r, 11, make_item(row['audio_lang'], Qt.AlignCenter))
             
-            # 11: Country (Center)
-            self.table_youtube.setItem(r, 11, make_item(row['country'], Qt.AlignCenter))
+            # 12: Country (Center)
+            self.table_youtube.setItem(r, 12, make_item(row['country'], Qt.AlignCenter))
             
-            # 12: Date (Center)
+            # 13: Date (Center)
             date_str = row['published_at'].replace("T", " ").replace("Z", "")
-            self.table_youtube.setItem(r, 12, make_item(date_str, Qt.AlignCenter))
+            self.table_youtube.setItem(r, 13, make_item(date_str, Qt.AlignCenter))
             
             # Row Height adjustment for thumbnail
             self.table_youtube.setRowHeight(r, 96)

@@ -92,6 +92,43 @@ class YoutubeSearchWorker(QThread):
 
             # 4. Merge Data
             results = []
+            
+            # YouTube Category ID Map
+            CATEGORY_MAP = {
+                "1": "Film & Animation",
+                "2": "Autos & Vehicles",
+                "10": "Music",
+                "15": "Pets & Animals",
+                "17": "Sports",
+                "18": "Short Movies",
+                "19": "Travel & Events",
+                "20": "Gaming",
+                "21": "Videoblogging",
+                "22": "People & Blogs",
+                "23": "Comedy",
+                "24": "Entertainment",
+                "25": "News & Politics",
+                "26": "Howto & Style",
+                "27": "Education",
+                "28": "Science & Technology",
+                "29": "Nonprofits & Activism",
+                "30": "Movies",
+                "31": "Anime/Animation",
+                "32": "Action/Adventure",
+                "33": "Classics",
+                "34": "Comedy",
+                "35": "Documentary",
+                "36": "Drama",
+                "37": "Family",
+                "38": "Foreign",
+                "39": "Horror",
+                "40": "Sci-Fi/Fantasy",
+                "41": "Thriller",
+                "42": "Shorts",
+                "43": "Shows",
+                "44": "Trailers"
+            }
+
             for idx, item in enumerate(items):
                 vid = item['id']['videoId']
                 cid = item['snippet']['channelId']
@@ -105,6 +142,10 @@ class YoutubeSearchWorker(QThread):
                 c_snip = c_detail.get('snippet', {})
                 c_stat = c_detail.get('statistics', {})
                 
+                # Category
+                cat_id = v_snip.get('categoryId', '0')
+                cat_name = CATEGORY_MAP.get(cat_id, cat_id)
+
                 # 썸네일: medium (320x180) or standard if avail
                 thumb_url = item['snippet']['thumbnails'].get('medium', {}).get('url', '')
                 if not thumb_url:
@@ -116,6 +157,7 @@ class YoutubeSearchWorker(QThread):
                     'channel_id': cid,
                     'thumbnail_url': thumb_url,
                     'channel_name': item['snippet']['channelTitle'],
+                    'category': cat_name,
                     'title': item['snippet']['title'], # HTML unescape might be needed but usually OK
                     'view_count': int(v_stat.get('viewCount', 0)),
                     'subscriber_count': int(c_stat.get('subscriberCount', 0)),
