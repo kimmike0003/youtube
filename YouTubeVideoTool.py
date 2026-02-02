@@ -77,7 +77,7 @@ class CustomTabWidget(QWidget):
         btn = QPushButton(title)
         btn.setCheckable(True)
         btn.setFixedHeight(40) # 적당한 높이
-        btn.clicked.connect(lambda: self.setCurrentIndex(self.stack.indexOf(widget)))
+        btn.clicked.connect(lambda checked=False: self.setCurrentIndex(self.stack.indexOf(widget)))
         
         idx = len(self.buttons)
         row = idx // 6
@@ -3111,6 +3111,13 @@ class MainApp(QWidget):
         self.combo_prompt_filter_type.addItems(['전체', '대본', '설명', '이미지', 'TTS', '기타'])
         self.combo_prompt_filter_type.currentIndexChanged.connect(lambda: self.change_prompt_page(0)) # Reset to page 1 on filter
         
+        self.combo_prompt_filter_type.currentIndexChanged.connect(lambda: self.change_prompt_page(0)) # Reset to page 1 on filter
+        
+        # Channel Filter Combo
+        self.combo_prompt_filter_channel = QComboBox()
+        self.combo_prompt_filter_channel.setFixedWidth(150)
+        self.combo_prompt_filter_channel.currentIndexChanged.connect(lambda: self.change_prompt_page(0))
+        
         self.btn_new_prompt = QPushButton("➕ 신규 등록 (New)")
         self.btn_new_prompt.setFixedWidth(150)
         self.btn_new_prompt.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
@@ -3118,6 +3125,8 @@ class MainApp(QWidget):
         
         btn_layout.addWidget(QLabel("구분 필터:"))
         btn_layout.addWidget(self.combo_prompt_filter_type)
+        btn_layout.addWidget(QLabel("채널명:"))
+        btn_layout.addWidget(self.combo_prompt_filter_channel)
         btn_layout.addStretch()
         btn_layout.addWidget(self.btn_new_prompt)
         list_layout.addLayout(btn_layout)
@@ -3168,6 +3177,9 @@ class MainApp(QWidget):
         
         list_layout.addLayout(pagination_layout)
         self.page_prompt_list.setLayout(list_layout)
+
+        # Load channels for filter
+        QTimer.singleShot(1000, self.load_prompt_filter_channels)
         
         # === Page 2: Form View ===
         self.page_prompt_form = QWidget()
@@ -3291,6 +3303,27 @@ class MainApp(QWidget):
                 
         except Exception as e:
             self.log_signal.emit(f"채널 로드 오류: {e}")
+
+    def load_prompt_filter_channels(self):
+        try:
+            self.combo_prompt_filter_channel.clear()
+            self.combo_prompt_filter_channel.addItem("전체", None)
+            
+            if not getattr(self, 'tts_client', None):
+                 self.tts_client = ElevenLabsClient()
+            
+            conn = self.tts_client.get_db_connection()
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("SELECT channel_id, channel_name FROM channel WHERE state='1' ORDER BY channel_id ASC")
+            rows = cursor.fetchall()
+            cursor.close()
+            conn.close()
+            
+            for row in rows:
+                self.combo_prompt_filter_channel.addItem(row['channel_name'], row['channel_id'])
+                
+        except Exception as e:
+            self.log_signal.emit(f"필터 채널 로드 오류: {e}")
 
     def download_prompt_content(self):
         content = self.input_prompt_contents.toPlainText()
@@ -3464,6 +3497,11 @@ class MainApp(QWidget):
             if filter_type != '전체':
                 where_clause += " AND p.prompt_type = %s"
                 params.append(filter_type)
+
+            filter_channel_id = self.combo_prompt_filter_channel.currentData()
+            if filter_channel_id is not None:
+                where_clause += " AND c.channel_id = %s"
+                params.append(filter_channel_id)
             
             # 1. Total Count
             count_query = f"SELECT COUNT(*) as cnt FROM prompt p JOIN channel c ON p.channel_id = c.channel_id {where_clause}"
