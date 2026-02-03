@@ -16,7 +16,7 @@ import re
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QTextEdit, 
                              QPushButton, QLabel, QFileDialog, QHBoxLayout, 
                              QTabWidget, QComboBox, QSlider, QSpinBox, QGroupBox, QDoubleSpinBox, 
-                             QFormLayout, QLineEdit, QGridLayout, QCheckBox, QMessageBox,
+                             QFormLayout, QLineEdit, QGridLayout, QCheckBox, QMessageBox, QColorDialog,
                              QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QStackedWidget,
                              QSizePolicy)
 import json
@@ -37,7 +37,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 # Monkey Patch for Pillow > 9.x not having ANTIALIAS, which MoviePy needs
 if not hasattr(Image, 'ANTIALIAS'):
     Image.ANTIALIAS = Image.LANCZOS
@@ -136,6 +136,7 @@ class MainApp(QWidget):
         self.start_time_fx = 0
         self.loaded_items = []
         self.current_file_path = ""
+        self.font_path_map = {}
         self.initUI()
         self.ui_timer = QTimer()
         self.ui_timer.timeout.connect(self.update_timer_display)
@@ -227,6 +228,11 @@ class MainApp(QWidget):
         self.tab_gold_price = QWidget()
         self.initTabGoldPrice()
         self.tabs.addTab(self.tab_gold_price, "금시세")
+
+        # 15. Thumbnail
+        self.tab_thumbnail = QWidget()
+        self.initTabThumbnail()
+        self.tabs.addTab(self.tab_thumbnail, "썸네일")
 
 
 
@@ -1268,6 +1274,7 @@ class MainApp(QWidget):
                         fams = QFontDatabase.applicationFontFamilies(font_id)
                         for fam in fams:
                             loaded_families.add(fam)
+                            self.font_path_map[fam] = font_path
         
         # 2. 모든 사용 가능한 폰트 패밀리 가져오기
         all_families = QFontDatabase().families()
@@ -2050,9 +2057,12 @@ class MainApp(QWidget):
         # Load keys from DB (using tts_client if available)
         self.yt_keys = []
         if hasattr(self, 'tts_client') and self.tts_client:
-            self.yt_keys = self.tts_client.get_youtube_keys()
-            for k in self.yt_keys:
-                self.combo_yt_key.addItem(k['name'], k['api_key'])
+            try:
+                self.yt_keys = self.tts_client.get_youtube_keys()
+                for k in self.yt_keys:
+                    self.combo_yt_key.addItem(k['name'], k['api_key'])
+            except Exception as e:
+                print(f"YouTube 키 로드 실패 (DB 접속 오류 등): {e}")
         
         filter_layout.addWidget(QLabel("키 (API Key):"), 0, 0)
         filter_layout.addWidget(self.combo_yt_key, 0, 1)
@@ -4147,6 +4157,226 @@ class MainApp(QWidget):
         try:
             os.startfile(os.path.dirname(output_path))
         except: pass
+
+    def initTabThumbnail(self):
+        layout = QVBoxLayout()
+        
+        # 0. Background Image
+        bg_layout = QHBoxLayout()
+        self.thumb_bg_path = QLineEdit()
+        self.thumb_bg_path.setPlaceholderText("배경 이미지 경로 (비어있으면 검은색 1280x720)")
+        btn_bg = QPushButton("배경 선택")
+        btn_bg.clicked.connect(lambda: self.browse_single_file(self.thumb_bg_path, "Images (*.png *.jpg *.jpeg)"))
+        bg_layout.addWidget(QLabel("배경:"))
+        bg_layout.addWidget(self.thumb_bg_path)
+        bg_layout.addWidget(btn_bg)
+        layout.addLayout(bg_layout)
+
+        # Lines Group
+        self.thumb_lines = []
+        
+        # Default Settings per line (Size, Y-Pos, ColorHex)
+        defaults = [
+            (50, 49, "#FFFF00"),  # Line 1: Yellow
+            (140, 63, "#FFFFFF"), # Line 2: White
+            (140, 83, "#FF0000")  # Line 3: Red
+        ]
+        
+        for i in range(3):
+            # i=0: Title (Top), i=1: Sub (Middle), i=2: Sub2 (Bottom)
+            group = QGroupBox(f"줄 {i+1}")
+            g_layout = QHBoxLayout()
+            
+            text_edit = QLineEdit()
+            text_edit.setPlaceholderText(f"내용 입력 {i+1}")
+            
+            font_combo = QComboBox()
+            font_combo.setMinimumWidth(150)
+            
+            # Copy items & Set Default Font
+            target_font = "Gmarket Sans TTF Bold"
+            target_idx = 0
+            
+            if hasattr(self, 'combo_font') and self.combo_font.count() > 0:
+                 for j in range(self.combo_font.count()):
+                     f_text = self.combo_font.itemText(j)
+                     font_combo.addItem(f_text)
+                     if target_font.replace(" ", "").lower() in f_text.replace(" ", "").lower():
+                         target_idx = j
+            else:
+                font_combo.addItem("Arial")
+            
+            if font_combo.count() > target_idx:
+                font_combo.setCurrentIndex(target_idx)
+            
+            # Apply Defaults
+            def_size, def_y, def_color = defaults[i]
+            
+            size_spin = QSpinBox()
+            size_spin.setRange(10, 500)
+            size_spin.setValue(def_size)
+            size_spin.setSuffix(" px")
+
+            # Color Button
+            color_btn = QPushButton("색상")
+            color_btn.current_color = def_color
+            
+            # Contrast Text Color for Button
+            bg_c = QColor(def_color)
+            text_c = 'black' if bg_c.lightness() > 128 else 'white'
+            color_btn.setStyleSheet(f"background-color: {def_color}; color: {text_c}; font-weight: bold; border: 1px solid #555;")
+            
+            color_btn.clicked.connect(lambda checked, b=color_btn: self.pick_color_btn(b))
+            
+            # Y Position (Percentage)
+            y_spin = QSpinBox()
+            y_spin.setRange(0, 100)
+            y_spin.setValue(def_y)
+            y_spin.setSuffix(" %")
+
+            g_layout.addWidget(QLabel("텍스트:"))
+            g_layout.addWidget(text_edit, 3)
+            g_layout.addWidget(QLabel("폰트:"))
+            g_layout.addWidget(font_combo, 2)
+            g_layout.addWidget(QLabel("크기:"))
+            g_layout.addWidget(size_spin, 1)
+            g_layout.addWidget(color_btn, 1)
+            g_layout.addWidget(QLabel("Y위치:"))
+            g_layout.addWidget(y_spin, 1)
+            
+            group.setLayout(g_layout)
+            layout.addWidget(group)
+            
+            self.thumb_lines.append({
+                'text': text_edit,
+                'font': font_combo,
+                'size': size_spin,
+                'color_btn': color_btn,
+                'y_pos': y_spin
+            })
+            
+        # Preview & Action
+        btn_layout = QHBoxLayout()
+        btn_gen = QPushButton("🔄 미리보기/생성")
+        btn_gen.clicked.connect(self.generate_thumbnail)
+        btn_gen.setStyleSheet("height: 40px; background-color: #673AB7; color: white; font-weight: bold;")
+        
+        btn_save = QPushButton("💾 저장")
+        btn_save.clicked.connect(self.save_thumbnail)
+        btn_save.setStyleSheet("height: 40px; background-color: #28a745; color: white; font-weight: bold;")
+        
+        btn_layout.addWidget(btn_gen)
+        btn_layout.addWidget(btn_save)
+        layout.addLayout(btn_layout)
+        
+        # Preview Label
+        self.thumb_preview_label = QLabel()
+        self.thumb_preview_label.setAlignment(Qt.AlignCenter)
+        self.thumb_preview_label.setStyleSheet("border: 2px dashed #555; background-color: #222;")
+        self.thumb_preview_label.setMinimumHeight(400)
+        self.thumb_preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        layout.addWidget(self.thumb_preview_label)
+        
+        # Keep reference to current image
+        self.current_thumb_image = None
+        
+        self.tab_thumbnail.setLayout(layout)
+
+    def pick_color_btn(self, btn):
+        color = QColorDialog.getColor()
+        if color.isValid():
+            hex_color = color.name()
+            btn.current_color = hex_color
+            # Contrast text color
+            text_c = 'black' if color.lightness() > 128 else 'white'
+            btn.setStyleSheet(f"background-color: {hex_color}; color: {text_c}; font-weight: bold; border: 1px solid #555;")
+
+    def generate_thumbnail(self):
+        # 1. Background
+        bg_path = self.thumb_bg_path.text().strip()
+        width, height = 1280, 720
+        
+        try:
+            if bg_path and os.path.exists(bg_path):
+                base_img = Image.open(bg_path).convert("RGBA")
+                base_img = base_img.resize((width, height), Image.LANCZOS)
+            else:
+                base_img = Image.new("RGBA", (width, height), (0, 0, 0, 255))
+                
+            draw = ImageDraw.Draw(base_img)
+            
+            # 2. Draw Lines
+            for item in self.thumb_lines:
+                text = item['text'].text().strip()
+                if not text: continue
+                
+                font_name = item['font'].currentText()
+                font_size = item['size'].value()
+                color_hex = item['color_btn'].current_color
+                y_percent = item['y_pos'].value()
+                
+                # Load Font
+                font = None
+                if font_name in self.font_path_map:
+                    try:
+                        font = ImageFont.truetype(self.font_path_map[font_name], font_size)
+                    except:
+                        pass
+                
+                if font is None:
+                    # Try system font or default
+                    try:
+                        font = ImageFont.truetype("arial.ttf", font_size)
+                    except:
+                        font = ImageFont.load_default()
+                
+                # Calculate Position
+                # Centered Horizontally, Y based on percentage
+                try:
+                    left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
+                    text_w = right - left
+                    text_h = bottom - top
+                except:
+                    text_w, text_h = draw.textsize(text, font=font)
+                
+                x_pos = (width - text_w) / 2
+                y_pos = (height * (y_percent / 100.0)) - (text_h / 2)
+                
+                # Outline
+                stroke_width = max(1, int(font_size / 20))
+                stroke_color = "black" if color_hex.lower() != "#000000" else "white"
+                
+                draw.text((x_pos, y_pos), text, font=font, fill=color_hex, stroke_width=stroke_width, stroke_fill=stroke_color)
+                
+            self.current_thumb_image = base_img
+            
+            # 3. Show Preview
+            # Convert RGBA to QImage
+            data = base_img.tobytes("raw", "RGBA")
+            qim = QImage(data, width, height, QImage.Format_RGBA8888)
+            pixmap = QPixmap.fromImage(qim)
+            
+            # Scale to fit label
+            scaled_pixmap = pixmap.scaled(self.thumb_preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.thumb_preview_label.setPixmap(scaled_pixmap)
+            
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"썸네일 생성 중 오류: {e}")
+            traceback.print_exc()
+
+    def save_thumbnail(self):
+        if self.current_thumb_image is None:
+            QMessageBox.warning(self, "경고", "먼저 썸네일을 생성해주세요.")
+            return
+            
+        path, _ = QFileDialog.getSaveFileName(self, "썸네일 저장", "", "PNG Files (*.png);;JPG Files (*.jpg)")
+        if path:
+            try:
+                self.current_thumb_image.save(path)
+                QMessageBox.information(self, "완료", f"저장되었습니다:\n{path}")
+            except Exception as e:
+                QMessageBox.critical(self, "오류", f"저장 실패: {e}")
+
 
 
 class BatchVideoEffectWorker(VideoMergerWorker):
