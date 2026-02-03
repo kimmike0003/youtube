@@ -4170,6 +4170,13 @@ class MainApp(QWidget):
         bg_layout.addWidget(QLabel("배경:"))
         bg_layout.addWidget(self.thumb_bg_path)
         bg_layout.addWidget(btn_bg)
+        
+        # Gradient Checkbox
+        self.chk_thumb_gradient = QCheckBox("하단 그라데이션")
+        self.chk_thumb_gradient.setChecked(True)
+        self.chk_thumb_gradient.setStyleSheet("color: white; font-weight: bold;")
+        bg_layout.addWidget(self.chk_thumb_gradient)
+        
         layout.addLayout(bg_layout)
 
         # Lines Group
@@ -4302,7 +4309,34 @@ class MainApp(QWidget):
                 base_img = base_img.resize((width, height), Image.LANCZOS)
             else:
                 base_img = Image.new("RGBA", (width, height), (0, 0, 0, 255))
+            
+            # Apply Bottom Gradient if Checked
+            if hasattr(self, 'chk_thumb_gradient') and self.chk_thumb_gradient.isChecked():
+                # Gradient parameters
+                grad_height = int(height * 0.65) # Bottom 65% height
                 
+                # Create alpha mask for gradient (Transparent -> Opaque)
+                # Use PIL to draw gradient
+                alpha_mask = Image.new('L', (1, grad_height), 0)
+                for y in range(grad_height):
+                    # Linear gradient: 0 to 255
+                    alpha = int(255 * (y / grad_height))
+                    alpha_mask.putpixel((0, y), alpha)
+                
+                # Resize to full width
+                alpha_mask = alpha_mask.resize((width, grad_height))
+                
+                # Create black layer with this alpha
+                black_layer = Image.new("RGBA", (width, grad_height), "black")
+                black_layer.putalpha(alpha_mask)
+                
+                # Paste onto a full size transparent layer to composite correctly
+                overlay = Image.new("RGBA", (width, height), (0,0,0,0))
+                overlay.paste(black_layer, (0, height - grad_height))
+                
+                # Composite
+                base_img = Image.alpha_composite(base_img, overlay)
+
             draw = ImageDraw.Draw(base_img)
             
             # 2. Draw Lines
