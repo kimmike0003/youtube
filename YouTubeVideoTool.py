@@ -2492,19 +2492,25 @@ class MainApp(QWidget):
         tab_conv = QWidget()
         l_conv = QVBoxLayout()
         
-        conv_in_group = QGroupBox("M4A 파일 선택")
+        conv_in_group = QGroupBox("WAV 폴더 선택 (WAV -> MP3)")
         conv_in_layout = QHBoxLayout()
-        self.at_m4a_files = QLineEdit()
-        self.at_m4a_files.setPlaceholderText("선택된 파일이 없습니다.")
-        btn_m4a = QPushButton("파일 찾기")
-        btn_m4a.clicked.connect(lambda: self.browse_files(self.at_m4a_files, "Audio Files (*.m4a)"))
-        conv_in_layout.addWidget(self.at_m4a_files)
-        conv_in_layout.addWidget(btn_m4a)
+        self.at_wav_folder = QLineEdit()
+        self.at_wav_folder.setPlaceholderText("폴더를 선택하세요. (해당 폴더의 모든 WAV 변환)")
+        btn_wav = QPushButton("폴더 찾기")
+        btn_wav.clicked.connect(lambda: self.browse_folder(self.at_wav_folder))
+        conv_in_layout.addWidget(self.at_wav_folder)
+        conv_in_layout.addWidget(btn_wav)
         conv_in_group.setLayout(conv_in_layout)
         
+
         l_conv.addWidget(conv_in_group)
         
-        self.btn_at_convert = QPushButton("1. M4A -> MP3 변환 시작 (선택 파일)")
+        # 합치기 옵션 추가
+        self.chk_merge_mp3 = QCheckBox("변환 후 MP3 파일 하나로 합치기 (영상 파일은 순서대로 정렬됨 1,2,3...)")
+        self.chk_merge_mp3.setChecked(True)
+        l_conv.addWidget(self.chk_merge_mp3)
+        
+        self.btn_at_convert = QPushButton("1. WAV -> MP3 변환 시작 (폴더 전체)")
         self.btn_at_convert.setStyleSheet("background-color: #009688; color: white; padding: 10px; font-weight: bold;")
         self.btn_at_convert.clicked.connect(lambda: self.start_audio_transcribe("convert"))
         l_conv.addWidget(self.btn_at_convert)
@@ -2585,25 +2591,47 @@ class MainApp(QWidget):
         raw_text = ""
         
         if mode == "convert":
-            raw_text = self.at_m4a_files.text().strip()
+            folder_path = self.at_wav_folder.text().strip()
+            if not folder_path or not os.path.isdir(folder_path):
+                QMessageBox.warning(self, "경고", "유효한 폴더 경로가 아닙니다.")
+                return
+            
+            # 폴더 내 wav 파일 검색
+            files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.lower().endswith('.wav')]
+            
+            # WAV가 없더라도 병합 옵션이 켜져있고 MP3가 있다면 진행
+            if not files and self.chk_merge_mp3.isChecked():
+                mp3_files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.lower().endswith('.mp3')]
+                if mp3_files:
+                    files = mp3_files # MP3 파일들을 타겟으로 설정하여 워커에 경로 전달
+            
+            if not files:
+                 QMessageBox.warning(self, "경고", "해당 폴더에 WAV (또는 병합할 MP3) 파일이 없습니다.")
+                 return
+            target_files = files
+            
         elif mode == "transcribe":
             raw_text = self.at_mp3_files.text().strip()
+            if not raw_text:
+                QMessageBox.warning(self, "경고", "선택된 파일이 없습니다.")
+                return
+            target_files = [f.strip() for f in raw_text.split(";") if f.strip()]
+            
         elif mode == "all":
             raw_text = self.at_all_files.text().strip()
+            if not raw_text:
+                 QMessageBox.warning(self, "경고", "선택된 파일이 없습니다.")
+                 return
+            target_files = [f.strip() for f in raw_text.split(";") if f.strip()]
             
-        if not raw_text:
-            QMessageBox.warning(self, "경고", "선택된 파일이 없습니다.")
-            return
-
-        target_files = [f.strip() for f in raw_text.split(";") if f.strip()]
-        
         if not target_files:
-            QMessageBox.warning(self, "경고", "파일 목록이 유효하지 않습니다.")
+            QMessageBox.warning(self, "경고", "처리할 파일 목록이 없습니다.")
             return
 
         model_name = self.combo_whisper_model.currentText()
+        merge_mp3 = self.chk_merge_mp3.isChecked() if mode == "convert" else False
         
-        self.at_log.append(f"🚀 작업 시작: {mode} (Model: {model_name})")
+        self.at_log.append(f"🚀 작업 시작: {mode} (Model: {model_name}, Merge: {merge_mp3})")
         self.at_log.append(f"📂 대상: {len(target_files)}개 파일")
         
         # Disable buttons
@@ -2611,7 +2639,7 @@ class MainApp(QWidget):
         self.btn_at_transcribe.setEnabled(False)
         self.btn_at_all.setEnabled(False)
         
-        self.at_worker = AudioTranscriberWorker(target_files, mode, model_name)
+        self.at_worker = AudioTranscriberWorker(target_files, mode, model_name, merge_mp3)
         self.at_worker.log_signal.connect(self.at_log.append)
         self.at_worker.finished.connect(self.on_at_finished)
         self.at_worker.error.connect(self.on_at_error)
@@ -4836,14 +4864,21 @@ class AudioTranscriberWorker(QThread):
     finished = pyqtSignal(str)
     error = pyqtSignal(str)
 
-    def __init__(self, target_files, mode, model_name):
+    def __init__(self, target_files, mode, model_name, merge_mp3=False):
         super().__init__()
         self.target_files = target_files # List of absolute file paths
         self.mode = mode # 'convert', 'transcribe', 'all'
         self.model_name = model_name
+        self.merge_mp3 = merge_mp3
 
     def run(self):
         job_start_time = time.time()
+        
+        # Capture processing directory early (needed for merge, even if source files are deleted)
+        target_dir = None
+        if self.target_files:
+            target_dir = os.path.dirname(self.target_files[0])
+
         try:
             # 1. FFmpeg Check (Common)
             # 1. FFmpeg Check & Setup for Whisper
@@ -4897,18 +4932,18 @@ class AudioTranscriberWorker(QThread):
 
             self.target_files.sort()
             
-            # --- M4A -> MP3 ---
+            # --- Audio (M4A/WAV) -> MP3 ---
             if self.mode in ["convert", "all"]:
-                # Filter M4A from the selected list
-                m4a_files = [f for f in self.target_files if f.lower().endswith('.m4a')]
+                # Filter Audio files from the selected list
+                audio_files = [f for f in self.target_files if f.lower().endswith(('.m4a', '.wav'))]
 
-                if not m4a_files:
-                    self.log_signal.emit("⚠️ 선택된 파일 중 M4A 파일이 없습니다.")
+                if not audio_files:
+                    self.log_signal.emit("⚠️ 선택된 파일 중 MP3로 변환할 파일(WAV/M4A)이 없습니다.")
                 else:
-                    self.log_signal.emit(f"🔄 M4A -> MP3 변환 시작 (총 {len(m4a_files)}개)")
+                    self.log_signal.emit(f"🔄 Audio -> MP3 변환 시작 (총 {len(audio_files)}개)")
                     creation_flags = 0x08000000 if os.name == 'nt' else 0
                     
-                    for in_path in m4a_files:
+                    for in_path in audio_files:
                         in_dir = os.path.dirname(in_path)
                         base = os.path.splitext(os.path.basename(in_path))[0]
                         out_path = os.path.join(in_dir, base + ".mp3")
@@ -4929,8 +4964,68 @@ class AudioTranscriberWorker(QThread):
                                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 check=True, creationflags=creation_flags
                             )
+                            # WAV 파일인 경우 변환 후 삭제
+                            if in_path.lower().endswith('.wav'):
+                                try:
+                                    os.remove(in_path)
+                                    self.log_signal.emit(f"   🗑️ 원본 삭제됨: {f_name}")
+                                except Exception as del_err:
+                                    self.log_signal.emit(f"   ⚠️ 삭제 실패: {del_err}")
                         except Exception as e:
                             self.log_signal.emit(f"   ❌ 변환 실패 ({f_name}): {e}")
+            
+            # --- Merge MP3s (New Feature) ---
+            if self.mode == "convert" and self.merge_mp3:
+                # Use the target_dir captured at start
+                if target_dir and os.path.isdir(target_dir):
+                    # Sleep briefly to ensure file system sync
+                    time.sleep(1.0)
+                    
+                    mp3s = [f for f in os.listdir(target_dir) if f.lower().endswith('.mp3')]
+                    
+                    # Sort naturally (1, 2, ... 10)
+                    # Extract numbers from filename for robust sorting
+                    def natural_sort_key(s):
+                        return [int(text) if text.isdigit() else text.lower()
+                                for text in re.split('([0-9]+)', s)]
+                    
+                    mp3s.sort(key=natural_sort_key)
+                    
+                    if len(mp3s) > 1:
+                        self.log_signal.emit(f"🔄 MP3 합치기 시작 ({len(mp3s)}개 파일)...")
+                        
+                        # Create file list for ffmpeg concat
+                        list_path = os.path.join(target_dir, "file_list.txt")
+                        output_mp3 = os.path.join(target_dir, f"merged_audio_{int(time.time())}.mp3")
+                        
+                        try:
+                            with open(list_path, "w", encoding='utf-8') as f:
+                                for mp3 in mp3s:
+                                    if "merged_audio" not in mp3: # avoid including previously merged files
+                                        f.write(f"file '{mp3}'\n")
+                            
+                            cmd_merge = [
+                                ffmpeg_exe, "-y", "-f", "concat", "-safe", "0",
+                                "-i", list_path, "-c", "copy", output_mp3
+                            ]
+                            
+                            creation_flags = 0x08000000 if os.name == 'nt' else 0
+                            subprocess.run(
+                                cmd_merge, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                check=True, creationflags=creation_flags
+                            )
+                            self.log_signal.emit(f"   ✅ 합치기 완료: {os.path.basename(output_mp3)}")
+                            
+                            # Clean up list file
+                            if os.path.exists(list_path):
+                                os.remove(list_path)
+                                
+                        except Exception as e:
+                            self.log_signal.emit(f"   ❌ 합치기 실패: {e}")
+                    else:
+                        self.log_signal.emit("   ℹ️ 합칠 MP3 파일이 부족합니다 (2개 미만).")
+                else:
+                    self.log_signal.emit("   ⚠️ 폴더 경로를 찾을 수 없어 합치기를 건너뜁니다.")
 
             # --- MP3 -> SRT ---
             if self.mode in ["transcribe", "all"]:
@@ -4938,9 +5033,9 @@ class AudioTranscriberWorker(QThread):
                 
                 if self.mode == "all":
                     # In 'all' mode, we infer mp3 paths from the input m4a files
-                    m4a_files = [f for f in self.target_files if f.lower().endswith('.m4a')]
-                    for m4a in m4a_files:
-                        base = os.path.splitext(m4a)[0]
+                    audio_files = [f for f in self.target_files if f.lower().endswith(('.m4a', '.wav'))]
+                    for aud in audio_files:
+                        base = os.path.splitext(aud)[0]
                         mp3_files.append(base + ".mp3")
                 else:
                      # In 'transcribe' mode, use the selected mp3 files
