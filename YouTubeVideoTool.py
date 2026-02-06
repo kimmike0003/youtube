@@ -653,7 +653,7 @@ class MainApp(QWidget):
 
         # 4행: 배경색 및 사용 여부
         self.checkbox_use_bg = QCheckBox("배경색 사용")
-        self.checkbox_use_bg.setChecked(True)
+        self.checkbox_use_bg.setChecked(False)
         self.checkbox_use_bg.stateChanged.connect(self.update_color_indicators)
         
         style_layout.addWidget(self.checkbox_use_bg, 4, 0)
