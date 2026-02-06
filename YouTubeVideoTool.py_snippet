@@ -1,0 +1,117 @@
+    def initTabShorts(self):
+        layout = QVBoxLayout()
+
+        # 1. 안내 문구
+        layout.addWidget(QLabel("📢 이미지와 오디오(MP3), 자막(JSON)을 이용하여 9:16 숏츠 영상을 일괄 생성합니다."))
+        
+        # 2. 폴더 선택 그룹
+        file_group = QGroupBox("폴더 설정")
+        file_layout = QGridLayout()
+
+        self.shorts_input_dir = QLineEdit()
+        self.shorts_input_dir.setPlaceholderText("이미지(.jpg/png)와 오디오(.mp3)가 있는 폴더")
+        btn_browse_in = QPushButton("입력 폴더 선택")
+        btn_browse_in.clicked.connect(lambda: self.browse_folder(self.shorts_input_dir))
+        
+        file_layout.addWidget(QLabel("입력(소스) 폴더:"), 0, 0)
+        file_layout.addWidget(self.shorts_input_dir, 0, 1)
+        file_layout.addWidget(btn_browse_in, 0, 2)
+
+        self.shorts_output_dir = QLineEdit()
+        self.shorts_output_dir.setPlaceholderText("숏츠 영상 저장 폴더")
+        btn_browse_out = QPushButton("출력 폴더 선택")
+        btn_browse_out.clicked.connect(lambda: self.browse_folder(self.shorts_output_dir))
+        
+        file_layout.addWidget(QLabel("출력(저장) 폴더:"), 1, 0)
+        file_layout.addWidget(self.shorts_output_dir, 1, 1)
+        file_layout.addWidget(btn_browse_out, 1, 2)
+
+        file_group.setLayout(file_layout)
+        layout.addWidget(file_group)
+
+        # 3. 스타일 설정 (폰트 크기 등)
+        style_group = QGroupBox("숏츠 스타일 설정")
+        style_layout = QFormLayout()
+
+        # 상단 제목 크기
+        self.spin_shorts_top_size = QSpinBox()
+        self.spin_shorts_top_size.setRange(20, 200)
+        self.spin_shorts_top_size.setValue(80)
+        style_layout.addRow("상단 제목 폰트 크기:", self.spin_shorts_top_size)
+
+        # 하단 자막 크기
+        self.spin_shorts_bottom_size = QSpinBox()
+        self.spin_shorts_bottom_size.setRange(20, 200)
+        self.spin_shorts_bottom_size.setValue(60)
+        style_layout.addRow("하단 자막 폰트 크기:", self.spin_shorts_bottom_size)
+        
+        style_layout.addRow(QLabel("ℹ️ 폰트체, 색상, 테두리는 '자막설정' 탭의 설정을 따릅니다."))
+
+        style_group.setLayout(style_layout)
+        layout.addWidget(style_group)
+
+        # 4. 실행 버튼
+        self.btn_start_shorts = QPushButton("📱 숏츠 영상 일괄 생성 시작 (Start Batch)")
+        self.btn_start_shorts.setStyleSheet("height: 50px; font-weight: bold; background-color: #E91E63; color: white; border-radius: 8px; margin-top: 10px;")
+        self.btn_start_shorts.clicked.connect(self.start_batch_shorts)
+        layout.addWidget(self.btn_start_shorts)
+
+        # 5. 로그창
+        self.shorts_log = QTextEdit()
+        self.shorts_log.setReadOnly(True)
+        self.shorts_log.setStyleSheet("background-color: #1E1E1E; color: #D4D4D4;")
+        layout.addWidget(self.shorts_log)
+
+        self.tab_shorts.setLayout(layout)
+
+    def start_batch_shorts(self):
+        in_dir = self.shorts_input_dir.text().strip()
+        out_dir = self.shorts_output_dir.text().strip()
+        
+        if not os.path.exists(in_dir):
+            QMessageBox.warning(self, "경고", "입력 폴더가 존재하지 않습니다.")
+            return
+            
+        if not out_dir:
+            out_dir = os.path.join(in_dir, "shorts_output")
+            
+        # 스타일 구성
+        style = {
+            'font_family': self.combo_font.currentText(),
+            'font_size': self.spin_shorts_bottom_size.value(), # 기본 크기는 하단 자막 기준
+            'title_font_size': self.spin_shorts_top_size.value(), # 상단용 (Worker에서 처리 필요)
+            'text_color': self.color_text,
+            'outline_color': self.color_outline,
+            'bg_color': self.color_bg,
+            'bg_opacity': int(self.slider_bg_opacity.value() * 2.55),
+            'use_bg': self.checkbox_use_bg.isChecked(),
+            'use_outline': self.checkbox_use_outline.isChecked()
+        }
+        
+        volume = self.slider_volume.value() / 100.0
+        
+        self.btn_start_shorts.setEnabled(False)
+        self.shorts_log.append("🚀 숏츠 일괄 생성을 시작합니다...")
+        self.shorts_log.append(f"📂 입력: {in_dir}")
+        self.shorts_log.append(f"📂 출력: {out_dir}")
+        
+        # Worker 생성 (VideoMergerWorker 사용)
+        from youtube_worker_video import VideoMergerWorker
+        self.shorts_worker = VideoMergerWorker(
+            image_dir=in_dir,
+            audio_dir=in_dir,
+            output_dir=out_dir,
+            subtitles=None, # JSON 자동 탐색
+            style=style,
+            volume=volume,
+            trim_end=0.0,
+            use_random_effects=False, # 숏츠는 보통 정지 이미지나 단순 줌
+            is_shorts=True
+        )
+        
+        self.shorts_worker.log_signal.connect(self.shorts_log.append)
+        self.shorts_worker.finished.connect(lambda msg, t: [self.shorts_log.append(f"🏁 {msg}"), self.btn_start_shorts.setEnabled(True)])
+        self.shorts_worker.error.connect(lambda err: [self.shorts_log.append(f"❌ {err}"), self.btn_start_shorts.setEnabled(True)])
+        
+        self.shorts_worker.start()
+

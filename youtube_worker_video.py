@@ -11,7 +11,8 @@ import multiprocessing
 import concurrent.futures
 import numpy as np
 import shutil
-from PIL import Image
+from datetime import datetime
+from PIL import Image, ImageDraw, ImageFont
 
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QRect, QRectF
 from PyQt5.QtGui import (QColor, QFont, QImage, QPainter, QPen, QBrush, QPainterPath)
@@ -1304,3 +1305,323 @@ class VideoConcatenatorWorkerOld(QThread):
         except Exception as e:
             self.error.emit(f"❌ 합치기 오류: {e}")
             traceback.print_exc()
+
+class GoldShortsWorker(QThread):
+    log_signal = pyqtSignal(str)
+    finished = pyqtSignal(str, float)
+    error = pyqtSignal(str)
+
+    def __init__(self, bg_video, audio_dir, gold_text, output_dir):
+        super().__init__()
+        self.bg_video = bg_video
+        self.audio_dir = audio_dir
+        self.gold_text = gold_text
+        self.output_dir = output_dir
+        
+        # 숏츠 해상도
+        self.W = 1080
+        self.H = 1920
+        
+        # 폰트 설정 (윈도우 기본 폰트 가정)
+        # Gmarket Sans TTF Bold
+        font_path = r"D:\youtube\fonts\GmarketSansTTFBold.ttf"
+        if os.path.exists(font_path):
+            self.font_bold = font_path
+            self.font_reg = font_path # Bold로 통일 요청
+        else:
+            self.font_bold = "malgunbd.ttf"
+            self.font_reg = "malgun.ttf"
+        
+    def run(self):
+        start_time = time.time()
+        try:
+            if not os.path.exists(self.output_dir):
+                os.makedirs(self.output_dir)
+
+            # 1. 데이터 파싱
+            gold_data = self.parse_gold_data(self.gold_text)
+            self.log_signal.emit("✅ 금시세 데이터 파싱 완료")
+
+            # 2. 오버레이 이미지 생성 (헤더, 푸터)
+            # 임시 폴더
+            temp_dir = os.path.join(self.output_dir, "temp_assets")
+            os.makedirs(temp_dir, exist_ok=True)
+            
+            header_path = os.path.join(temp_dir, "header.png")
+            footer_path = os.path.join(temp_dir, "footer.png")
+            
+            self.create_header_image(gold_data, header_path)
+            self.create_footer_image(gold_data, footer_path)
+            self.log_signal.emit("✅ 오버레이 디자인 생성 완료")
+            
+            # 3. 오디오 파일 스캔
+            audio_files = [f for f in os.listdir(self.audio_dir) if f.lower().endswith('.mp3')]
+            
+            # 자연스러운 정렬
+            audio_files.sort(key=lambda s: [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', s)])
+            
+            if not audio_files:
+                self.error.emit("❌ MP3 파일이 없습니다.")
+                return
+
+            total = len(audio_files)
+            success_count = 0
+            
+            # FFmpeg 확인
+            try:
+                import imageio_ffmpeg
+                ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+            except ImportError:
+                ffmpeg_exe = "ffmpeg"
+
+            for idx, mp3_file in enumerate(audio_files):
+                try:
+                    base_name = os.path.splitext(mp3_file)[0]
+                    audio_path = os.path.join(self.audio_dir, mp3_file)
+                    
+                    # Timestamp filename
+                    ts = datetime.now().strftime("%Y%m%d%H%M")
+                    # Append index to avoid overwrite if multiple processed in same minute
+                    if total > 1:
+                        output_filename = f"Gold_Shorts_{ts}_{idx+1}.mp4"
+                    else:
+                        output_filename = f"Gold_Shorts_{ts}.mp4"
+                        
+                    output_path = os.path.join(self.output_dir, output_filename)
+                    
+                    self.log_signal.emit(f"🎬 [{idx+1}/{total}] 영상 생성 중: {base_name}")
+                    
+                    
+                    # 오디오 길이 측정
+                    audio_dur = self.get_audio_duration(audio_path)
+                    
+                    # FFmpeg 명령 구성
+                    cmd = [ffmpeg_exe, "-y"]
+                    # 0: BG Video (Loop)
+                    cmd.extend(["-stream_loop", "-1", "-i", self.bg_video])
+                    # 1: Audio
+                    cmd.extend(["-i", audio_path])
+                    # 2: Header Image (Loop)
+                    cmd.extend(["-loop", "1", "-i", header_path])
+                    # 3: Footer Image (Loop)
+                    cmd.extend(["-loop", "1", "-i", footer_path])
+                    
+                    filter_complex = ""
+                    # 1. 배경 스케일링 & 크롭 (9:16)
+                    filter_complex += f"[0:v]scale={self.W}:{self.H}:force_original_aspect_ratio=increase,crop={self.W}:{self.H}:(iw-ow)/2:(ih-oh)/2[bg];"
+                    
+                    # 2. 오버레이 합성
+                    # Header (Top)
+                    filter_complex += f"[bg][2:v]overlay=0:0[v1];"
+                    filter_complex += f"[v1][3:v]overlay=0:0[v2];"
+                    
+                    last_v = "[v2]"
+                    
+                    # 4. 맵핑
+                    cmd.extend(["-filter_complex", filter_complex])
+                    # No subtitles, just bg/overlay and audio
+                    cmd.extend(["-map", last_v, "-map", "1:a"])
+                    
+                    # 오디오 길이에 맞춤 (가장 짧은 스트림=오디오 기준 종료)
+                    cmd.extend(["-shortest"])
+                    cmd.extend(["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p"])
+                    cmd.extend(["-c:a", "aac", "-b:a", "192k"])
+                    cmd.append(output_path)
+                    
+                    # 실행
+                    creation_flags = 0x08000000 if os.name == 'nt' else 0
+                    subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=creation_flags)
+                    success_count += 1
+                    
+                except Exception as e:
+                    self.log_signal.emit(f"❌ {base_name} 실패: {e}")
+                    traceback.print_exc()
+
+            # Temp 정리
+            try:
+                shutil.rmtree(temp_dir)
+            except: pass
+            
+            elapsed = time.time() - start_time
+            self.finished.emit(f"작업 완료! 성공: {success_count}/{total}", elapsed)
+
+        except Exception as e:
+            self.error.emit(f"치명적 오류: {e}")
+            traceback.print_exc()
+
+    def parse_gold_data(self, text):
+        data = {
+            "date": "",
+            "global_gold": "",
+            "global_silver": "",
+            "domestic_table": []
+        }
+        
+        lines = text.split('\n')
+        domestic_mode = False
+        current_item = {}
+        
+        # 날짜 추출 (첫번째 보이는 날짜)
+        date_match = re.search(r'(\d{4}\.\d{2}\.\d{2}.*) 기준', text)
+        if date_match:
+            data["date"] = date_match.group(1).strip() + " 기준"
+
+        for line in lines:
+            line = line.strip()
+            if not line: continue
+            
+            # 국제
+            if "Gold:" in line and "$" in line:
+                data["global_gold"] = line.split("Gold:")[1].split("(")[0].strip()
+            if "Silver:" in line and "$" in line and "Gold" not in line: # Silver만 있는 줄
+                data["global_silver"] = line.split("Silver:")[1].split("(")[0].strip()
+            
+            # 국내 테이블 파싱
+            if "국내 시세" in line:
+                domestic_mode = True
+                continue
+                
+            if domestic_mode:
+                if line.startswith("🏷️"):
+                    # 아이템 시작
+                    if current_item:
+                        data["domestic_table"].append(current_item)
+                    current_item = {"name": line.replace("🏷️", "").strip(), "sell": "-", "buy": "-", "sell_chg": "", "buy_chg": ""}
+                elif "🔻 팔때:" in line or "팔때:" in line:
+                    val_part = line.split("팔때:")[1].strip()
+                    if "(" in val_part:
+                        price = val_part.split("(")[0].strip()
+                        current_item["sell"] = price
+                    else:
+                        current_item["sell"] = val_part
+                elif "🔺 살때:" in line or "살때:" in line:
+                    val_part = line.split("살때:")[1].strip()
+                    if "(" in val_part:
+                        price = val_part.split("(")[0].strip()
+                        current_item["buy"] = price
+                    else:
+                        current_item["buy"] = val_part
+        
+        if current_item:
+            data["domestic_table"].append(current_item)
+            
+        print("Parsed Data:", data)
+        return data
+
+    def create_header_image(self, data, save_path):
+        img = Image.new('RGBA', (self.W, self.H), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        
+        # 그라데이션 대신 반투명 박스 (상단 300px) - Date가 빠졌으므로 높이 감소
+        header_h = 280
+        
+        # Gradient simulation (Top to Bottom) - Darker
+        for y in range(header_h):
+            alpha = int(220 * (1 - (y / header_h))) 
+            draw.line([(0, y), (self.W, y)], fill=(0, 0, 0, alpha))
+
+        # 폰트 로드
+        try:
+            font_title = ImageFont.truetype(self.font_bold, 85) # Increased
+            font_global = ImageFont.truetype(self.font_bold, 45) # Increased
+        except:
+            font_title = ImageFont.load_default()
+            font_global = ImageFont.load_default()
+            
+        # Helper for shadow/stroke
+        def draw_text_stroke(x, y, text, font, fill, anchor="mm", stroke_w=2, stroke_c="black"):
+            draw.text((x, y), text, font=font, fill=fill, anchor=anchor, stroke_width=stroke_w, stroke_fill=stroke_c)
+
+        # Title Center
+        draw_text_stroke(self.W/2, 90, "오늘의 금시세", font_title, "#FFD700", stroke_w=5)
+            
+        # Global Info (Removed Date from here)
+        g_text = f"국제  Gold {data['global_gold']}  Silver {data['global_silver']}"
+        draw_text_stroke(self.W/2, 200, g_text, font_global, "#FFD700", stroke_w=3) # Changed to Yellow (Gold)
+
+        img.save(save_path)
+
+    def create_footer_image(self, data, save_path):
+        img = Image.new('RGBA', (self.W, self.H), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        
+        # Helper (Re-define or use class method if refactored, but here inline is fine)
+        def draw_text_stroke(x, y, text, font, fill, anchor="mm", stroke_w=2, stroke_c="black"):
+            draw.text((x, y), text, font=font, fill=fill, anchor=anchor, stroke_width=stroke_w, stroke_fill=stroke_c)
+        
+        row_h = 90 # Reduced from 100
+        rows = len(data["domestic_table"])
+        header_h = 100 # Increased for better spacing
+        date_area_h = 80 # New area for date
+        
+        # Filter rows first to count correct height
+        display_rows = []
+        for item in data["domestic_table"]:
+            if "순금" in item['name'] or "은" in item['name']:
+                 display_rows.append(item)
+        
+        table_h = date_area_h + header_h + (len(display_rows) * row_h) + 220 # bottom padding ~220
+        
+        start_y = self.H - table_h
+        
+        # Background
+        draw.rectangle([(0, start_y), (self.W, self.H)], fill=(0, 0, 0, 220))
+        
+        try:
+            font_date = ImageFont.truetype(self.font_bold, 38)
+            font_head = ImageFont.truetype(self.font_bold, 40)
+            font_row_bold = ImageFont.truetype(self.font_bold, 45)
+            font_row = ImageFont.truetype(self.font_bold, 40)
+        except:
+            font_date = ImageFont.load_default()
+            font_head = ImageFont.load_default()
+            font_row_bold = ImageFont.load_default()
+            font_row = ImageFont.load_default()
+
+        col1_x = 180 
+        col2_x = 540 
+        col3_x = 900 
+        
+        current_y = start_y + 40
+        
+        # --- NEW: Date Here ---
+        if data["date"]:
+            # Left aligned (anchor='lm' -> left middle)
+            # Position at left edge
+            date_x = 50
+            draw_text_stroke(date_x, current_y, data["date"], font_date, "#DDDDDD", anchor="lm", stroke_w=2)
+            
+        current_y += date_area_h
+        
+        # Header
+        draw_text_stroke(col1_x, current_y, "품목", font_head, "#CCCCCC", stroke_w=2)
+        draw_text_stroke(col2_x, current_y, "파실때", font_head, "#CCCCCC", stroke_w=2)
+        draw_text_stroke(col3_x, current_y, "사실때", font_head, "#CCCCCC", stroke_w=2)
+        
+        current_y += 60
+        draw.line([(40, current_y), (self.W-40, current_y)], fill="#666666", width=2)
+        current_y += 50 # Margin
+        
+        # Rows
+        for item in display_rows:
+            display_name = item['name']
+            if "순금" in display_name:
+                display_name = "순금(1돈)"
+            elif "은" in display_name:
+                display_name = "은(1돈)"
+
+            draw_text_stroke(col1_x, current_y, display_name, font_row, "#E0E0E0", stroke_w=2) # Name
+            draw_text_stroke(col2_x, current_y, item['sell'], font_row_bold, "white", stroke_w=2) # Sell (White)
+            draw_text_stroke(col3_x, current_y, item['buy'], font_row_bold, "#FFD700", stroke_w=2) # Buy (Gold)
+            
+            current_y += row_h
+
+        img.save(save_path)
+
+    def get_audio_duration(self, path):
+        try:
+            import soundfile as sf
+            f = sf.SoundFile(path)
+            return len(f) / f.samplerate
+        except:
+            return 30.0

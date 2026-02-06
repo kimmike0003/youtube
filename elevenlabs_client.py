@@ -93,7 +93,7 @@ class ElevenLabsClient:
             conn = self.get_db_connection()
             cursor = conn.cursor(dictionary=True)
             # Fetch prompt (voice_name) and model_id (actual voice ID)
-            cursor.execute("SELECT voice_name, model_id FROM voice_actor WHERE use_yn='Y'")
+            cursor.execute("SELECT voice_name, model_id FROM voice_actor WHERE use_yn='Y' ORDER BY order_no ASC")
             rows = cursor.fetchall()
             
             for row in rows:
