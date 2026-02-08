@@ -1311,12 +1311,14 @@ class GoldShortsWorker(QThread):
     finished = pyqtSignal(str, float)
     error = pyqtSignal(str)
 
-    def __init__(self, bg_video, audio_dir, gold_text, output_dir):
+    def __init__(self, bg_video, audio_dir, gold_text, output_dir, bg_music=None, music_vol=0.2):
         super().__init__()
         self.bg_video = bg_video
         self.audio_dir = audio_dir
         self.gold_text = gold_text
         self.output_dir = output_dir
+        self.bg_music = bg_music
+        self.music_vol = music_vol
         
         # 숏츠 해상도
         self.W = 1080
@@ -1406,6 +1408,12 @@ class GoldShortsWorker(QThread):
                     # 3: Footer Image (Loop)
                     cmd.extend(["-loop", "1", "-i", footer_path])
                     
+                    # 4: Background Music (Loop) if exists
+                    has_bg_music = False
+                    if self.bg_music and os.path.exists(self.bg_music):
+                        cmd.extend(["-stream_loop", "-1", "-i", self.bg_music])
+                        has_bg_music = True
+                    
                     filter_complex = ""
                     # 1. 배경 스케일링 & 크롭 (9:16)
                     filter_complex += f"[0:v]scale={self.W}:{self.H}:force_original_aspect_ratio=increase,crop={self.W}:{self.H}:(iw-ow)/2:(ih-oh)/2[bg];"
@@ -1417,10 +1425,21 @@ class GoldShortsWorker(QThread):
                     
                     last_v = "[v2]"
                     
+                    # 3. 오디오 믹싱
+                    last_a = "1:a" # Default TTS audio
+                    if has_bg_music:
+                        # [4:a] is bg music
+                        # First apply volume to bg music
+                        filter_complex += f"[4:a]volume={self.music_vol}[bgm];"
+                        # Mix [1:a] (TTS) and [bgm]
+                        # duration=first ensures output length matches TTS length
+                        filter_complex += f"[1:a][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout];"
+                        last_a = "[aout]"
+                    
                     # 4. 맵핑
                     cmd.extend(["-filter_complex", filter_complex])
                     # No subtitles, just bg/overlay and audio
-                    cmd.extend(["-map", last_v, "-map", "1:a"])
+                    cmd.extend(["-map", last_v, "-map", last_a])
                     
                     # 오디오 길이에 맞춤 (가장 짧은 스트림=오디오 기준 종료)
                     cmd.extend(["-shortest"])

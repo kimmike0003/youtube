@@ -152,25 +152,30 @@ class MainApp(QWidget):
 
         # ========== 1단 (Upper Row) ==========
         
-        # 1. GenSpark Image
+        # 1. ElevenLabs TTS
+        self.tab2 = QWidget()
+        self.initTab2()
+        self.tabs.addTab(self.tab2, "ElevenLabs TTS")
+
+        # 4. Audio Transcribe
+        self.tab_transcribe = QWidget()
+        self.initTabAudioTranscribe()
+        self.tabs.addTab(self.tab_transcribe, "Audio Transcribe")
+
+        # 2. GenSpark Image
         self.tab1 = QWidget()
         self.initTab1()
         self.tabs.addTab(self.tab1, "Ganspark Image")
 
-        # 2. ImageFX Image
-        self.tab_fx = QWidget()
-        self.initTabImageFX()
-        self.tabs.addTab(self.tab_fx, "ImageFX Image")
+        # # 2. ImageFX Image (Hidden)
+        # self.tab_fx = QWidget()
+        # self.initTabImageFX()
+        # self.tabs.addTab(self.tab_fx, "ImageFX Image")
 
-        # 3. Gemini API Image
-        self.tab_gemini = QWidget()
-        self.initTabGeminiAPI()
-        self.tabs.addTab(self.tab_gemini, "Gemini API Image")
-
-        # 3. ElevenLabs TTS
-        self.tab2 = QWidget()
-        self.initTab2()
-        self.tabs.addTab(self.tab2, "ElevenLabs TTS")
+        # # 3. Gemini API Image (Hidden)
+        # self.tab_gemini = QWidget()
+        # self.initTabGeminiAPI()
+        # self.tabs.addTab(self.tab_gemini, "Gemini API Image")
 
         # 4. Video Composite
         self.tab3 = QWidget()
@@ -194,12 +199,7 @@ class MainApp(QWidget):
         self.initTab4()
         self.tabs.addTab(self.tab4, "최종영상")
 
-        # 8. Audio Transcribe
-        self.tab_transcribe = QWidget()
-        self.initTabAudioTranscribe()
-        self.tabs.addTab(self.tab_transcribe, "Audio Transcribe")
-
-        # 9. Audio To Video
+        # 8. Audio To Video
         self.tab_audio_video = QWidget()
         self.initTabAudioToVideo()
         self.tabs.addTab(self.tab_audio_video, "Audio To Video")
@@ -227,7 +227,7 @@ class MainApp(QWidget):
         # 14. 숏츠생성 (Shorts)
         self.tab_shorts = QWidget()
         self.initTabShorts()
-        self.tabs.addTab(self.tab_shorts, "숏츠생성")
+        self.tabs.addTab(self.tab_shorts, "금은숏츠")
 
         # 15. Gold Price Shorts
         self.tab_gold_price = QWidget()
@@ -526,8 +526,17 @@ class MainApp(QWidget):
         self.btn_stop_tts.setEnabled(False)
         self.btn_stop_tts.clicked.connect(self.stop_tts)
 
+        # 오디오 병합 버튼 (테스트용)
+        self.btn_merge_audio = QPushButton("🔗 오디오 병합 (Merge Audio Only)")
+        self.btn_merge_audio.setStyleSheet("""
+            QPushButton { height: 50px; font-weight: bold; background-color: #17a2b8; color: white; border-radius: 10px; }
+            QPushButton:hover { background-color: #138496; }
+        """)
+        self.btn_merge_audio.clicked.connect(self.merge_existing_audio)
+
         btn_layout.addWidget(self.btn_generate_tts)
         btn_layout.addWidget(self.btn_stop_tts)
+        btn_layout.addWidget(self.btn_merge_audio)
         layout.addLayout(btn_layout)
 
         # 텍스트 입력
@@ -1474,14 +1483,175 @@ class MainApp(QWidget):
             
             self.log_signal.emit(f"🎉 전체 작업 완료 ({success_count}/{len(tasks)})")
             
+            # --- 병합 로직 ---
+            if success_count == len(tasks) and not self.stop_tts_flag:
+                if len(tasks) > 1:
+                    self._merge_audio_files_thread(tasks, custom_dir)
+                else:
+                    self.log_signal.emit("ℹ️ 단일 파일이므로 병합 과정을 생략합니다.")
+
         except Exception as e:
             self.error_signal.emit(f"❌ 치명적 오류: {e}")
         finally:
-            # 버튼 활성화는 시그널로 처리해야 안전하지만, 여기선 간단히
-            # 실제로는 시그널을 통해 메인 스레드에서 처리하는 것이 좋음.
-            # self.btn_generate_tts.setEnabled(True) -> UI 스레드 접근 위반 가능성
-            # 여기서는 log_signal을 통해 간접적으로 알림.
             self.enable_button_signal.emit(True)
+
+    def merge_existing_audio(self):
+        custom_dir = self.audio_path_edit.text().strip()
+        if not os.path.isdir(custom_dir):
+             self.tts_log.append("❌ 유효한 저장 폴더가 아닙니다.")
+             return
+             
+        files = []
+        try:
+            for f in os.listdir(custom_dir):
+                if f.lower().endswith(".mp3") and f[:-4].isdigit():
+                    files.append(f)
+            
+            if len(files) < 2:
+                self.tts_log.append("❌ 병합할 파일이 충분하지 않습니다 (2개 이상 필요).")
+                return
+                
+            files.sort(key=lambda x: int(x[:-4]))
+            tasks = [(None, f, None) for f in files]
+            
+            self.tts_log.append(f"🔍 {len(files)}개의 파일 검색됨. 병합 시작...")
+            threading.Thread(target=self._merge_audio_files_thread, args=(tasks, custom_dir), daemon=True).start()
+            
+        except Exception as e:
+            self.tts_log.append(f"❌ 파일 검색 중 오류: {e}")
+
+    def _merge_audio_files_thread(self, tasks, custom_dir):
+        try:
+            self.log_signal.emit("🔗 오디오 및 데이터 병합 시작...")
+            clips = []
+            valid_files = True
+            
+            for task in tasks:
+                filename = task[1]
+                file_path = os.path.join(custom_dir, filename)
+                if os.path.exists(file_path):
+                    try:
+                        clip = mpe.AudioFileClip(file_path)
+                        clips.append(clip)
+                    except Exception as ce:
+                        self.log_signal.emit(f"   ⚠️ 오디오 로드 실패 ({filename}): {ce}")
+                        valid_files = False
+                        break
+                else:
+                     valid_files = False
+                     break
+            
+            if valid_files and clips:
+                # 1. MP3 병합
+                output_path = os.path.join(custom_dir, "merge.mp3")
+                try:
+                    final_clip = mpe.concatenate_audioclips(clips)
+                    final_clip.write_audiofile(output_path, logger=None, bitrate="192k")
+                    self.log_signal.emit(f"✅ 오디오 병합 성공: {output_path}")
+                    
+                    # 2. JSON/SRT 병합
+                    self.log_signal.emit("🔗 JSON 데이터 병합 시작 (merge.json)...")
+                    merged_json = {
+                        "characters": [],
+                        "character_start_times_seconds": [],
+                        "character_end_times_seconds": [],
+                        "sub_segments": []
+                    }
+                    current_time_offset = 0.0
+                    
+                    for i, clip in enumerate(clips):
+                        task = tasks[i]
+                        filename = task[1]
+                        base_name = os.path.splitext(filename)[0]
+                        json_path = os.path.join(custom_dir, base_name + ".json")
+                        
+                        if os.path.exists(json_path):
+                            try:
+                                with open(json_path, "r", encoding="utf-8") as f:
+                                    data = json.load(f)
+                                if "characters" in data: merged_json["characters"].extend(data["characters"])
+                                if "character_start_times_seconds" in data:
+                                    merged_json["character_start_times_seconds"].extend([t + current_time_offset for t in data["character_start_times_seconds"]])
+                                if "character_end_times_seconds" in data:
+                                    merged_json["character_end_times_seconds"].extend([t + current_time_offset for t in data["character_end_times_seconds"]])
+                                if "sub_segments" in data: merged_json["sub_segments"].extend(data["sub_segments"])
+                            except Exception as e_json:
+                                self.log_signal.emit(f"   ⚠️ JSON 병합 실패 ({base_name}.json): {e_json}")
+                        
+                        current_time_offset += clip.duration
+                    
+                    merged_json_path = os.path.join(custom_dir, "merge.json")
+                    with open(merged_json_path, "w", encoding="utf-8") as f:
+                        json.dump(merged_json, f, ensure_ascii=False, indent=4)
+                    self.log_signal.emit(f"✅ JSON 병합 완료")
+                    
+                    # 3. SRT 생성
+                    def format_srt_time(seconds):
+                        millis = int((seconds - int(seconds)) * 1000)
+                        seconds = int(seconds)
+                        minutes, seconds = divmod(seconds, 60)
+                        hours, minutes = divmod(minutes, 60)
+                        return f"{hours:02}:{minutes:02}:{seconds:02},{millis:03}"
+
+                    srt_path = os.path.join(custom_dir, "merge.srt")
+                    with open(srt_path, "w", encoding="utf-8") as srt_file:
+                        srt_idx = 1
+                        all_chars = merged_json.get("characters", [])
+                        all_starts = merged_json.get("character_start_times_seconds", [])
+                        all_ends = merged_json.get("character_end_times_seconds", [])
+                        char_idx = 0
+                        
+                        for segment in merged_json.get("sub_segments", []):
+                            original_text = segment.get("original", "").strip()
+                            tts_text = segment.get("tts", "")
+                            if not tts_text: continue
+                            
+                            segment_start = None
+                            segment_end = None
+                            
+                            target_chars = [c for c in tts_text if not c.isspace()]
+                            if not target_chars: continue
+                            
+                            temp_char_idx = char_idx
+                            first_match = False
+                            
+                            for t_char in target_chars:
+                                while temp_char_idx < len(all_chars):
+                                    if temp_char_idx >= len(all_chars): break
+                                    if all_chars[temp_char_idx].isspace():
+                                        temp_char_idx += 1
+                                        continue
+                                    if all_chars[temp_char_idx] == t_char:
+                                        if not first_match:
+                                            if temp_char_idx < len(all_starts): segment_start = all_starts[temp_char_idx]
+                                            first_match = True
+                                        if temp_char_idx < len(all_ends): segment_end = all_ends[temp_char_idx]
+                                        temp_char_idx += 1
+                                        break
+                                    temp_char_idx += 1
+                            
+                            char_idx = temp_char_idx
+                            if segment_start is not None and segment_end is not None:
+                                srt_file.write(f"{srt_idx}\n{format_srt_time(segment_start)} --> {format_srt_time(segment_end)}\n{original_text}\n\n")
+                                srt_idx += 1
+                    self.log_signal.emit(f"✅ SRT 생성 완료: {srt_path}")
+                
+                except Exception as e:
+                    self.log_signal.emit(f"❌ 병합 중 오류: {e}")
+                finally:
+                    if 'final_clip' in locals(): 
+                        try: final_clip.close() 
+                        except: pass
+                    for c in clips: 
+                        try: c.close() 
+                        except: pass
+            else:
+                self.log_signal.emit("❌ 유효한 파일이 없거나 로드할 수 없습니다.")
+                for c in clips: 
+                    try: c.close() 
+                    except: pass
+        except Exception as e:
+            self.error_signal.emit(f"❌ 스레드 오류: {e}")
             
     # 버튼 활성화를 위한 시그널 연결이 필요할 수 있음. 
     # 기존 코드 구조상 finished 시그널을 활용하거나 log_signal에 의존.
@@ -3631,15 +3801,39 @@ class MainApp(QWidget):
         file_layout.addWidget(self.shorts_bg_video, 0, 1)
         file_layout.addWidget(btn_browse_bg, 0, 2)
 
+        # 배경 음악 (NEW)
+        self.shorts_bg_music = QLineEdit()
+        self.shorts_bg_music.setPlaceholderText("배경 음악 파일(.mp3) - 선택 사항")
+        btn_browse_music = QPushButton("배경 음악 선택")
+        btn_browse_music.clicked.connect(lambda: self.browse_single_file(self.shorts_bg_music, "Audio Files (*.mp3 *.wav)"))
+        
+        file_layout.addWidget(QLabel("배경 음악:"), 1, 0)
+        file_layout.addWidget(self.shorts_bg_music, 1, 1)
+        file_layout.addWidget(btn_browse_music, 1, 2)
+        
+        # 배경 음악 볼륨
+        self.shorts_music_volume = QSlider(Qt.Horizontal)
+        self.shorts_music_volume.setRange(0, 100)
+        self.shorts_music_volume.setValue(20) # Default 20%
+        self.lbl_music_vol = QLabel("20%")
+        self.shorts_music_volume.valueChanged.connect(lambda v: self.lbl_music_vol.setText(f"{v}%"))
+        
+        vol_layout = QHBoxLayout()
+        vol_layout.addWidget(self.shorts_music_volume)
+        vol_layout.addWidget(self.lbl_music_vol)
+        
+        file_layout.addWidget(QLabel("음악 볼륨:"), 2, 0)
+        file_layout.addLayout(vol_layout, 2, 1, 1, 2)
+
         # 오디오/자막 폴더
         self.shorts_audio_dir = QLineEdit()
         self.shorts_audio_dir.setPlaceholderText("MP3와 SRT 파일이 있는 폴더")
         btn_browse_audio = QPushButton("MP3/SRT 폴더")
         btn_browse_audio.clicked.connect(lambda: self.browse_folder(self.shorts_audio_dir))
         
-        file_layout.addWidget(QLabel("MP3/SRT 폴더:"), 1, 0)
-        file_layout.addWidget(self.shorts_audio_dir, 1, 1)
-        file_layout.addWidget(btn_browse_audio, 1, 2)
+        file_layout.addWidget(QLabel("MP3/SRT 폴더:"), 3, 0)
+        file_layout.addWidget(self.shorts_audio_dir, 3, 1)
+        file_layout.addWidget(btn_browse_audio, 3, 2)
         
         # 출력 폴더
         self.shorts_output_dir = QLineEdit()
@@ -3647,9 +3841,9 @@ class MainApp(QWidget):
         btn_browse_out = QPushButton("저장 폴더 선택")
         btn_browse_out.clicked.connect(lambda: self.browse_folder(self.shorts_output_dir))
         
-        file_layout.addWidget(QLabel("저장 폴더:"), 2, 0)
-        file_layout.addWidget(self.shorts_output_dir, 2, 1)
-        file_layout.addWidget(btn_browse_out, 2, 2)
+        file_layout.addWidget(QLabel("저장 폴더:"), 4, 0)
+        file_layout.addWidget(self.shorts_output_dir, 4, 1)
+        file_layout.addWidget(btn_browse_out, 4, 2)
 
         file_group.setLayout(file_layout)
         layout.addWidget(file_group)
@@ -3694,6 +3888,9 @@ class MainApp(QWidget):
 
     def start_batch_shorts(self):
         bg_video = self.shorts_bg_video.text().strip()
+        bg_music = self.shorts_bg_music.text().strip()
+        music_vol = self.shorts_music_volume.value() / 100.0 # 0.0 ~ 1.0
+        
         audio_dir = self.shorts_audio_dir.text().strip()
         out_dir = self.shorts_output_dir.text().strip()
         gold_text = self.shorts_gold_info.toPlainText().strip()
@@ -3718,7 +3915,7 @@ class MainApp(QWidget):
         
         # Worker 실행
         from youtube_worker_video import GoldShortsWorker
-        self.shorts_worker = GoldShortsWorker(bg_video, audio_dir, gold_text, out_dir)
+        self.shorts_worker = GoldShortsWorker(bg_video, audio_dir, gold_text, out_dir, bg_music, music_vol)
         
         self.shorts_worker.log_signal.connect(self.shorts_log.append)
         self.shorts_worker.finished.connect(lambda msg, t: [self.shorts_log.append(f"🏁 {msg}"), self.btn_start_shorts.setEnabled(True)])
