@@ -742,7 +742,14 @@ class MainApp(QWidget):
         path_layout.addWidget(btn_browse_wm, 2, 2)
 
         path_group.setLayout(path_layout)
+        path_group.setLayout(path_layout)
         layout.addWidget(path_group)
+
+        # Auto SRT Checkbox
+        self.chk_auto_srt = QCheckBox("영상 합치기 완료 후 자동으로 SRT 자막 생성 (Whisper)")
+        self.chk_auto_srt.setChecked(True)
+        self.chk_auto_srt.setStyleSheet("font-weight: bold; color: #E91E63; margin-top: 10px;")
+        layout.addWidget(self.chk_auto_srt)
 
 
         # 합치기/중지 버튼 (Horizontal Layout)
@@ -1154,6 +1161,29 @@ class MainApp(QWidget):
         self.btn_stop_concat.setEnabled(False)
         h, m, s = int(elapsed // 3600), int((elapsed % 3600) // 60), int(elapsed % 60)
         self.concat_log.append(f"{msg} (소요 시간: {h:02d}:{m:02d}:{s:02d})")
+
+        # Auto SRT Logic
+        if hasattr(self, 'chk_auto_srt') and self.chk_auto_srt.isChecked():
+            out_file = self.concat_output_file.text().strip()
+            if os.path.exists(out_file):
+                self.concat_log.append("🔄 자동 SRT 생성 시작...")
+                
+                # Use model from Audio Transcribe tab if available, else 'base'
+                model_name = "base"
+                if hasattr(self, 'combo_whisper_model'):
+                    model_name = self.combo_whisper_model.currentText()
+                
+                # Reuse AudioTranscriberWorker
+                # mode='transcribe' accepts mp3/mp4
+                self.auto_srt_worker = AudioTranscriberWorker([out_file], "transcribe", model_name, False)
+                
+                # Connect signals to concat_log
+                self.auto_srt_worker.log_signal.connect(self.concat_log.append)
+                self.auto_srt_worker.finished.connect(lambda m: self.concat_log.append(f"✅ SRT 생성 완료: {m}"))
+                self.auto_srt_worker.error.connect(lambda e: self.concat_log.append(f"❌ SRT 생성 실패: {e}"))
+                self.auto_srt_worker.start()
+            else:
+                 self.concat_log.append("⚠️ 결과 파일을 찾을 수 없어 SRT 생성을 건너뜁니다.")
 
     def update_color_indicators(self):
         # 선택된 색상을 작은 네모로 표시
