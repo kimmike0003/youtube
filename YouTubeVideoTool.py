@@ -2698,19 +2698,19 @@ class MainApp(QWidget):
         tab_srt = QWidget()
         l_srt = QVBoxLayout()
         
-        srt_in_group = QGroupBox("MP3 파일 선택")
+        srt_in_group = QGroupBox("MP3/MP4 파일 선택")
         srt_in_layout = QHBoxLayout()
         self.at_mp3_files = QLineEdit()
         self.at_mp3_files.setPlaceholderText("선택된 파일이 없습니다.")
         btn_mp3 = QPushButton("파일 찾기")
-        btn_mp3.clicked.connect(lambda: self.browse_files(self.at_mp3_files, "Audio Files (*.mp3)"))
+        btn_mp3.clicked.connect(lambda: self.browse_files(self.at_mp3_files, "Media Files (*.mp3 *.mp4)"))
         srt_in_layout.addWidget(self.at_mp3_files)
         srt_in_layout.addWidget(btn_mp3)
         srt_in_group.setLayout(srt_in_layout)
         
         l_srt.addWidget(srt_in_group)
         
-        self.btn_at_transcribe = QPushButton("2. MP3 -> SRT 자막 생성 시작 (선택 파일)")
+        self.btn_at_transcribe = QPushButton("2. MP3/MP4 -> SRT 자막 생성 시작 (선택 파일)")
         self.btn_at_transcribe.setStyleSheet("background-color: #673AB7; color: white; padding: 10px; font-weight: bold;")
         self.btn_at_transcribe.clicked.connect(lambda: self.start_audio_transcribe("transcribe"))
         l_srt.addWidget(self.btn_at_transcribe)
@@ -5367,16 +5367,16 @@ class AudioTranscriberWorker(QThread):
                         base = os.path.splitext(aud)[0]
                         mp3_files.append(base + ".mp3")
                 else:
-                     # In 'transcribe' mode, use the selected mp3 files
-                     mp3_files = [f for f in self.target_files if f.lower().endswith('.mp3')]
+                     # In 'transcribe' mode, use the selected mp3/mp4 files
+                     mp3_files = [f for f in self.target_files if f.lower().endswith(('.mp3', '.mp4'))]
                 
                 # Filter out non-existent mp3s (e.g. if conversion failed)
                 mp3_files = [f for f in mp3_files if os.path.exists(f)]
 
                 if not mp3_files:
-                    self.log_signal.emit("⚠️ MP3 파일이 없습니다 (변환이 실패했거나 선택되지 않음).")
+                    self.log_signal.emit("⚠️ MP3/MP4 파일이 없습니다 (변환이 실패했거나 선택되지 않음).")
                 else:
-                    self.log_signal.emit(f"📝 MP3 -> SRT 작업 시작 (총 {len(mp3_files)}개)")
+                    self.log_signal.emit(f"📝 MP3/MP4 -> SRT 작업 시작 (총 {len(mp3_files)}개)")
                     for in_path in mp3_files:
                         in_dir = os.path.dirname(in_path)
                         f_name = os.path.basename(in_path)
