@@ -152,20 +152,20 @@ class MainApp(QWidget):
 
         # ========== 1단 (Upper Row) ==========
         
-        # 1. ElevenLabs TTS
+        # 1. GenSpark Image (Originally 3rd, now 1st)
+        self.tab1 = QWidget()
+        self.initTab1()
+        self.tabs.addTab(self.tab1, "Ganspark Image")
+
+        # 2. ElevenLabs TTS
         self.tab2 = QWidget()
         self.initTab2()
         self.tabs.addTab(self.tab2, "ElevenLabs TTS")
 
-        # 4. Audio Transcribe
+        # 3. Audio Transcribe
         self.tab_transcribe = QWidget()
         self.initTabAudioTranscribe()
         self.tabs.addTab(self.tab_transcribe, "Audio Transcribe")
-
-        # 2. GenSpark Image
-        self.tab1 = QWidget()
-        self.initTab1()
-        self.tabs.addTab(self.tab1, "Ganspark Image")
 
         # # 2. ImageFX Image (Hidden)
         # self.tab_fx = QWidget()
@@ -204,40 +204,40 @@ class MainApp(QWidget):
         self.initTabAudioToVideo()
         self.tabs.addTab(self.tab_audio_video, "Audio To Video")
 
-        # 10. YouTube 분석
-        self.tab7 = QWidget()
-        self.initTab7()
-        self.tabs.addTab(self.tab7, "YouTube 분석")
-
-        # 11. FTP Upload
-        self.tab_ftp = QWidget()
-        self.initTabFTP()
-        self.tabs.addTab(self.tab_ftp, "FTP Upload")
-
-        # 12. Video List
+        # 9. Video List
         self.tab_video_list = QWidget()
         self.initTabVideoList()
         self.tabs.addTab(self.tab_video_list, "영상관리")
 
-        # 13. Prompt
+        # 10. Prompt
         self.tab_prompt = QWidget()
         self.initTabPrompt()
         self.tabs.addTab(self.tab_prompt, "프롬프트")
 
-        # 14. 숏츠생성 (Shorts)
+        # 11. 숏츠생성 (Shorts)
         self.tab_shorts = QWidget()
         self.initTabShorts()
         self.tabs.addTab(self.tab_shorts, "금은숏츠")
 
-        # 15. Gold Price Shorts
+        # 12. Gold Price Shorts
         self.tab_gold_price = QWidget()
         self.initTabGoldPrice()
         self.tabs.addTab(self.tab_gold_price, "금시세")
 
-        # 15. Thumbnail
+        # 13. Thumbnail
         self.tab_thumbnail = QWidget()
         self.initTabThumbnail()
         self.tabs.addTab(self.tab_thumbnail, "썸네일")
+
+        # 14. YouTube 분석 (Moved to last)
+        self.tab7 = QWidget()
+        self.initTab7()
+        self.tabs.addTab(self.tab7, "YouTube 분석")
+
+        # 15. FTP Upload (Moved to last)
+        self.tab_ftp = QWidget()
+        self.initTabFTP()
+        self.tabs.addTab(self.tab_ftp, "FTP Upload")
 
 
 
@@ -502,6 +502,11 @@ class MainApp(QWidget):
         self.spin_tts_trim.setValue(0.0)
         self.spin_tts_trim.setSuffix(" 초")
         form_layout.addRow("잡음 제거 (Trim End):", self.spin_tts_trim)
+        
+        # Merge JSON/MP3 Checkbox
+        self.chk_merge_mp3_json = QCheckBox("다운로드 후 merge.json, merge.mp3 만들기")
+        self.chk_merge_mp3_json.setChecked(False)
+        form_layout.addRow("", self.chk_merge_mp3_json)
 
         settings_group.setLayout(form_layout)
         layout.addWidget(settings_group)
@@ -733,6 +738,7 @@ class MainApp(QWidget):
         
         # 워터마크 선택 (New)
         self.watermark_path = QLineEdit()
+        self.watermark_path.setText(r"D:\youtube\logo")
         self.watermark_path.setPlaceholderText("워터마크 이미지 (선택 사항)")
         btn_browse_wm = QPushButton("워터마크 선택")
         btn_browse_wm.clicked.connect(lambda: self.browse_single_file(self.watermark_path, "Images (*.png *.jpg)"))
@@ -747,7 +753,7 @@ class MainApp(QWidget):
 
         # Auto SRT Checkbox
         self.chk_auto_srt = QCheckBox("영상 합치기 완료 후 자동으로 SRT 자막 생성 (Whisper)")
-        self.chk_auto_srt.setChecked(True)
+        self.chk_auto_srt.setChecked(False)
         self.chk_auto_srt.setStyleSheet("font-weight: bold; color: #E91E63; margin-top: 10px;")
         layout.addWidget(self.chk_auto_srt)
 
@@ -850,6 +856,7 @@ class MainApp(QWidget):
         
         # [NEW] 랜덤 효과 체크박스
         self.chk_random_effect = QCheckBox("🎲 랜덤 적용")
+        self.chk_random_effect.setChecked(True)
         self.chk_random_effect.setStyleSheet("font-weight: bold; color: #00BCD4;")
         self.chk_random_effect.toggled.connect(lambda checked: self.combo_effect_type.setDisabled(checked))
         
@@ -1431,6 +1438,7 @@ class MainApp(QWidget):
         speed = self.slider_speed.value() / 100.0
         volume = self.slider_tts_volume.value() / 100.0
         trim_end = self.spin_tts_trim.value() # 트리밍 값
+        do_merge = self.chk_merge_mp3_json.isChecked()
 
         # 파싱 로직: 그룹별로 텍스트 묶기
         subs_map = self.parse_subtitles(text)
@@ -1453,9 +1461,9 @@ class MainApp(QWidget):
 
         # 스레드로 실행 (tasks 리스트 전달)
         audio_target = self.audio_path_edit.text().strip()
-        threading.Thread(target=self._run_tts_thread, args=(tasks, voice_id, model_id, stability, similarity, style, speed, volume, audio_target, trim_end), daemon=True).start()
+        threading.Thread(target=self._run_tts_thread, args=(tasks, voice_id, model_id, stability, similarity, style, speed, volume, audio_target, trim_end, do_merge), daemon=True).start()
 
-    def _run_tts_thread(self, tasks, voice_id, model_id, stability, similarity, style, speed, volume, custom_dir, trim_end=0.0):
+    def _run_tts_thread(self, tasks, voice_id, model_id, stability, similarity, style, speed, volume, custom_dir, trim_end=0.0, do_merge=True):
         success_count = 0
         try:
             for task in tasks:
@@ -1515,10 +1523,13 @@ class MainApp(QWidget):
             
             # --- 병합 로직 ---
             if success_count == len(tasks) and not self.stop_tts_flag:
-                if len(tasks) > 1:
-                    self._merge_audio_files_thread(tasks, custom_dir)
+                if do_merge:
+                    if len(tasks) > 1:
+                        self._merge_audio_files_thread(tasks, custom_dir)
+                    else:
+                        self.log_signal.emit("ℹ️ 단일 파일이므로 병합 과정을 생략합니다.")
                 else:
-                    self.log_signal.emit("ℹ️ 단일 파일이므로 병합 과정을 생략합니다.")
+                    self.log_signal.emit("ℹ️ 옵션에 따라 병합을 건너뜁니다.")
 
         except Exception as e:
             self.error_signal.emit(f"❌ 치명적 오류: {e}")
