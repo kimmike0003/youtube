@@ -28,8 +28,13 @@ class BrowserLauncherWorker(QThread):
                 self.log_signal.emit("🌐 ImageFX용 브라우저를 실행합니다...")
                 user_data = r'C:\sel_chrome_fx'
                 target_url = "https://labs.google/fx/ko/tools/image-fx"
+                target_url = "https://labs.google/fx/ko/tools/image-fx"
                 port = 9223
+            elif self.browser_type == 'grok':
+                self.log_signal.emit("🌐 Grok용 브라우저를 실행합니다...")
+                target_url = "https://grok.com/imagine"
             else:
+                self.log_signal.emit("🌐 브라우저를 실행합니다...")
                 self.log_signal.emit("🌐 브라우저를 실행합니다...")
 
             if not os.path.exists(user_data):

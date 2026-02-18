@@ -47,8 +47,8 @@ import moviepy.editor as mpe
 from youtube_workers import YoutubeSearchWorker, ImageLoadWorker
 
 
-from youtube_worker_ai import GenSparkMultiTabWorker, ImageFXMultiTabWorker, GeminiAPIImageWorker
-from youtube_worker_video import VideoMergerWorker, SingleVideoWorker, VideoDubbingWorker, BatchDubbingWorker, VideoConcatenatorWorkerOld
+from youtube_worker_ai import GenSparkMultiTabWorker, ImageFXMultiTabWorker, GeminiAPIImageWorker, GrokMultiTabWorker
+from youtube_worker_video import VideoMergerWorker, SingleVideoWorker, VideoDubbingWorker, BatchDubbingWorker, VideoConcatenatorWorker
 from youtube_worker_launcher import BrowserLauncherWorker
 
 class CustomTabWidget(QWidget):
@@ -197,7 +197,13 @@ class MainApp(QWidget):
         # 7. Video Concat
         self.tab4 = QWidget()
         self.initTab4()
+        self.initTab4()
         self.tabs.addTab(self.tab4, "최종영상")
+
+        # 8. Grok Generation (New)
+        self.tab_grok_gen = QWidget()
+        self.initTabGrokGen()
+        self.tabs.addTab(self.tab_grok_gen, "그록생성")
 
         # 8. Audio To Video
         self.tab_audio_video = QWidget()
@@ -2677,6 +2683,137 @@ class MainApp(QWidget):
         time_str = f" ({h:02d}:{m:02d}:{s:02d})"
         self.single_log.append(f"🏁 {msg}{time_str}")
         self.btn_start_single.setEnabled(True)
+
+    # ==========================================
+    # Tab Grok Generation (New)
+    # ==========================================
+    def initTabGrokGen(self):
+        layout = QVBoxLayout()
+
+        self.grok_status_label = QLabel("1단계: Grok 브라우저 준비 (2개 탭)")
+        self.grok_status_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #D4D4D4;")
+        layout.addWidget(self.grok_status_label)
+
+        # 폴더 선택
+        path_layout = QHBoxLayout()
+        self.grok_input_dir = QLineEdit()
+        self.grok_input_dir.setPlaceholderText("이미지(1.jpg, 2.jpg...)가 있는 폴더")
+        btn_browse_grok = QPushButton("폴더 선택")
+        btn_browse_grok.clicked.connect(lambda: self.browse_folder(self.grok_input_dir))
+        
+        path_layout.addWidget(QLabel("이미지 폴더:"))
+        path_layout.addWidget(self.grok_input_dir)
+        path_layout.addWidget(btn_browse_grok)
+        layout.addLayout(path_layout)
+
+        # 브라우저 준비 버튼
+        self.btn_grok_prepare = QPushButton("🌐 1. Grok 브라우저 준비 (2 Tabs)")
+        self.btn_grok_prepare.setStyleSheet("height: 40px; font-weight: bold; background-color: #673AB7; color: white; border-radius: 8px;")
+        self.btn_grok_prepare.clicked.connect(self.launch_browser_grok_gen)
+        layout.addWidget(self.btn_grok_prepare)
+
+        # 시작 버튼
+        btn_h_layout = QHBoxLayout()
+        self.btn_grok_start = QPushButton("🚀 2. Grok 자동 생성 시작")
+        self.btn_grok_start.setStyleSheet("""
+            QPushButton { height: 50px; font-weight: bold; background-color: #28a745; color: white; border-radius: 8px; }
+            QPushButton:disabled { background-color: #6c757d; }
+        """)
+        self.btn_grok_start.clicked.connect(self.start_grok_generation)
+        
+        self.btn_grok_stop = QPushButton("🛑 중지")
+        self.btn_grok_stop.setEnabled(False)
+        self.btn_grok_stop.setStyleSheet("""
+            QPushButton { height: 50px; font-weight: bold; background-color: #dc3545; color: white; border-radius: 8px; }
+            QPushButton:disabled { background-color: #6c757d; }
+        """)
+        self.btn_grok_stop.clicked.connect(self.stop_grok_generation)
+
+        btn_h_layout.addWidget(self.btn_grok_start)
+        btn_h_layout.addWidget(self.btn_grok_stop)
+        layout.addLayout(btn_h_layout)
+
+        # 로그창
+        self.grok_log_display = QTextEdit()
+        self.grok_log_display.setReadOnly(True)
+        self.grok_log_display.setStyleSheet("background-color: #1E1E1E; color: #D4D4D4; font-family: 'Consolas', 'Malgun Gothic';")
+        layout.addWidget(self.grok_log_display)
+
+        self.tab_grok_gen.setLayout(layout)
+
+    def launch_browser_grok_gen(self):
+        try:
+             # 브라우저 실행 (Grok 모드)
+             # 기존 BrowserLauncherWorker는 port 9222/9223를 씀.
+             # Grok도 9222(기본)을 쓸지, 9223(FX)를 쓸지, 아니면 새로운 9224?
+             # 보통 Genspark랑 같이 쓸 일 없으므로 9222(기본) 써도 됨.
+             # 하지만 LauncherWorker에 Type을 'grok'으로 넘겨서 URL을 바꿔줘야 함.
+             
+             if not hasattr(self, 'browser_launcher_grok'):
+                 self.browser_launcher_grok = BrowserLauncherWorker('grok')
+                 self.browser_launcher_grok.log_signal.connect(self.grok_log_display.append)
+                 self.browser_launcher_grok.finished.connect(self.on_grok_browser_launch_finished)
+                 
+             self.browser_launcher_grok.start()
+        except Exception as e:
+             QMessageBox.critical(self, "오류", f"브라우저 실행 오류: {e}")
+
+    def on_grok_browser_launch_finished(self, result):
+        driver, error = result
+        if driver:
+            self.driver = driver
+            self.grok_log_display.append("✅ Grok 브라우저 준비 완료!")
+            
+            # 2개 탭 만들기 (이미 1개 열려있음)
+            try:
+                # wait for load
+                time.sleep(2)
+                current = len(driver.window_handles)
+                needed = 2 - current
+                for _ in range(needed):
+                    driver.execute_script("window.open('https://grok.com/imagine');")
+                    time.sleep(0.5)
+                
+                self.grok_log_display.append(f"ℹ️ 탭 {len(driver.window_handles)}개 준비됨.")
+                
+            except Exception as e:
+                self.grok_log_display.append(f"⚠️ 탭 추가 중 오류: {e}")
+                
+        else:
+            QMessageBox.critical(self, "오류", f"브라우저 실행 실패: {error}")
+
+    def start_grok_generation(self):
+        input_dir = self.grok_input_dir.text().strip()
+        if not input_dir or not os.path.exists(input_dir):
+            QMessageBox.warning(self, "경로 오류", "이미지 폴더 경로가 올바르지 않습니다.")
+            return
+            
+        if not self.driver:
+             QMessageBox.warning(self, "브라우저 오류", "먼저 브라우저를 준비해주세요 (1단계).")
+             return
+             
+        self.btn_grok_start.setEnabled(False)
+        self.btn_grok_stop.setEnabled(True)
+        self.grok_log_display.clear()
+        self.grok_log_display.append("🚀 Grok 자동생성 시작...")
+        
+        self.grok_worker = GrokMultiTabWorker(input_dir, self.driver)
+        self.grok_worker.progress.connect(lambda s: self.grok_log_display.append(f"[{datetime.now().strftime('%H:%M:%S')}] {s}"))
+        self.grok_worker.log_signal.connect(lambda s: self.grok_log_display.append(f"[{datetime.now().strftime('%H:%M:%S')}] {s}"))
+        self.grok_worker.finished.connect(self.on_grok_gen_finished)
+        self.grok_worker.error.connect(lambda s: self.grok_log_display.append(f"ERROR: {s}"))
+        self.grok_worker.start()
+
+    def stop_grok_generation(self):
+        if hasattr(self, 'grok_worker') and self.grok_worker.isRunning():
+            self.grok_worker.stop()
+            self.grok_log_display.append("🛑 중지 요청됨...")
+
+    def on_grok_gen_finished(self, msg, elapsed):
+        self.btn_grok_start.setEnabled(True)
+        self.btn_grok_stop.setEnabled(False)
+        self.grok_log_display.append(f"🏁 작업 완료: {msg} (소요시간: {elapsed:.2f}초)")
+        QMessageBox.information(self, "완료", f"Grok 생성 작업 완료\n{msg}")
         self.btn_stop_single.setEnabled(False)
 
     def initTabAudioTranscribe(self):
@@ -2899,13 +3036,21 @@ class MainApp(QWidget):
         
         # Controls
         btn_layout = QHBoxLayout()
+
+        # Filter Channel
+        self.combo_video_filter_channel = QComboBox()
+        self.combo_video_filter_channel.setMinimumWidth(150)
+        self.combo_video_filter_channel.currentIndexChanged.connect(self.load_video_list)
+        btn_layout.addWidget(QLabel("채널 필터:"))
+        btn_layout.addWidget(self.combo_video_filter_channel)
+        
+        btn_layout.addStretch()
         
         self.btn_new_video = QPushButton("➕ 신규 등록 (New)")
         self.btn_new_video.setFixedWidth(150)
         self.btn_new_video.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
         self.btn_new_video.clicked.connect(lambda: self.switch_to_form_view(None))
         
-        btn_layout.addStretch()
         btn_layout.addWidget(self.btn_new_video)
         list_layout.addLayout(btn_layout)
         
@@ -3056,11 +3201,14 @@ class MainApp(QWidget):
         
         # State
         self.current_video_id = None
+        self.current_channel_id = None
         self.current_page = 1
         self.items_per_page = 15
         self.total_pages = 1
         
         # Init Load
+        # Init Load
+        QTimer.singleShot(500, self.load_video_filter_channels)
         QTimer.singleShot(1000, self.load_video_list)
 
     def change_page(self, delta):
@@ -3091,8 +3239,31 @@ class MainApp(QWidget):
         except Exception as e:
             self.log_signal.emit(f"채널 로드 오류: {e}")
 
-    def switch_to_form_view(self, video_id=None):
+    def load_video_filter_channels(self):
+        try:
+            self.combo_video_filter_channel.blockSignals(True)
+            self.combo_video_filter_channel.clear()
+            self.combo_video_filter_channel.addItem("전체 채널", None)
+            
+            if not getattr(self, 'tts_client', None):
+                 self.tts_client = ElevenLabsClient()
+            conn = self.tts_client.get_db_connection()
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("SELECT channel_id, channel_name FROM channel WHERE state='1' ORDER BY channel_id ASC")
+            rows = cursor.fetchall()
+            cursor.close()
+            conn.close()
+            
+            for row in rows:
+                self.combo_video_filter_channel.addItem(row['channel_name'], row['channel_id'])
+                
+            self.combo_video_filter_channel.blockSignals(False)
+        except Exception as e:
+            self.log_signal.emit(f"필터 채널 로드 오류: {e}")
+
+    def switch_to_form_view(self, video_id=None, channel_id=None):
         self.current_video_id = video_id
+        self.current_channel_id = channel_id
         
         # Load Channels first
         self.load_channels()
@@ -3113,18 +3284,18 @@ class MainApp(QWidget):
             # Edit Mode - Fetch Data
             self.btn_save_video.setText("수정")
             self.btn_delete_video.setVisible(True)
-            self.load_video_detail(video_id)
+            self.load_video_detail(video_id, channel_id)
             
         self.video_list_stack.setCurrentIndex(1)
 
-    def load_video_detail(self, video_id):
+    def load_video_detail(self, video_id, channel_id):
         try:
             if not getattr(self, 'tts_client', None):
                  self.tts_client = ElevenLabsClient()
             
             conn = self.tts_client.get_db_connection()
             cursor = conn.cursor(dictionary=True)
-            cursor.execute("SELECT * FROM video WHERE id = %s", (video_id,))
+            cursor.execute("SELECT * FROM video WHERE id = %s AND channel_id = %s", (video_id, channel_id))
             row = cursor.fetchone()
             cursor.close()
             conn.close()
@@ -3153,9 +3324,11 @@ class MainApp(QWidget):
     def on_video_table_double_click(self, row, col):
         # Get ID from first column
         item = self.video_table.item(row, 0)
-        if item:
+        item_ch = self.video_table.item(row, 1)
+        if item and item_ch:
             video_id = item.text()
-            self.switch_to_form_view(video_id)
+            channel_id = item_ch.data(Qt.UserRole)
+            self.switch_to_form_view(video_id, channel_id)
 
     def save_video_data(self):
         title = self.input_title.text().strip()
@@ -3177,20 +3350,25 @@ class MainApp(QWidget):
             
             if self.current_video_id is None:
                 # INSERT
+                # 1. Get Max ID for this channel
+                cursor.execute("SELECT IFNULL(MAX(id), 0) + 1 FROM video WHERE channel_id = %s", (channel_id,))
+                new_id = cursor.fetchone()[0]
+
                 query = """
-                    INSERT INTO video (channel_id, title, script, img_script, tts_text, description, use_yn)
-                    VALUES (%s, %s, %s, %s, %s, %s, 'Y')
+                    INSERT INTO video (channel_id, id, title, script, img_script, tts_text, description, use_yn)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, 'Y')
                 """
-                cursor.execute(query, (channel_id, title, script, img_script, tts_text, description))
+                cursor.execute(query, (channel_id, new_id, title, script, img_script, tts_text, description))
                 msg = "새로운 영상 데이터가 등록되었습니다."
             else:
                 # UPDATE
+                # channel_id 변경 시 단순히 값만 업데이트 (move channel)
                 query = """
                     UPDATE video 
                     SET channel_id=%s, title=%s, script=%s, img_script=%s, tts_text=%s, description=%s
-                    WHERE id=%s
+                    WHERE channel_id=%s AND id=%s
                 """
-                cursor.execute(query, (channel_id, title, script, img_script, tts_text, description, self.current_video_id))
+                cursor.execute(query, (channel_id, title, script, img_script, tts_text, description, self.current_channel_id, self.current_video_id))
                 msg = "영상 데이터가 수정되었습니다."
                 
             conn.commit()
@@ -3221,7 +3399,7 @@ class MainApp(QWidget):
                      self.tts_client = ElevenLabsClient()
                 conn = self.tts_client.get_db_connection()
                 cursor = conn.cursor()
-                cursor.execute("DELETE FROM video WHERE id = %s", (self.current_video_id,))
+                cursor.execute("DELETE FROM video WHERE channel_id = %s AND id = %s", (self.current_channel_id, self.current_video_id))
                 conn.commit()
                 cursor.close()
                 conn.close()
@@ -3241,7 +3419,17 @@ class MainApp(QWidget):
             cursor = conn.cursor(dictionary=True)
             
             # 1. Get Total Count (Only state='1' channels)
-            cursor.execute("SELECT COUNT(*) as cnt FROM video v JOIN channel c ON v.channel_id = c.channel_id WHERE c.state = '1'")
+            filter_channel_id = self.combo_video_filter_channel.currentData()
+            
+            where_clause = "WHERE c.state = '1'"
+            params = []
+            
+            if filter_channel_id is not None:
+                where_clause += " AND v.channel_id = %s"
+                params.append(filter_channel_id)
+            
+            count_query = f"SELECT COUNT(*) as cnt FROM video v JOIN channel c ON v.channel_id = c.channel_id {where_clause}"
+            cursor.execute(count_query, tuple(params))
             total_count = cursor.fetchone()['cnt']
             
             # 2. Calculate Pagination
@@ -3256,15 +3444,16 @@ class MainApp(QWidget):
             offset = (self.current_page - 1) * self.items_per_page
             
             # 3. Fetch Data with Limit/Offset (Only state='1' channels)
+            # Sort by created_at DESC to show newest first
             query = f"""
                 SELECT v.*, c.channel_name 
                 FROM video v 
                 JOIN channel c ON v.channel_id = c.channel_id 
-                WHERE c.state = '1'
-                ORDER BY v.id DESC 
+                {where_clause}
+                ORDER BY v.created_at DESC, v.id DESC
                 LIMIT {self.items_per_page} OFFSET {offset}
             """
-            cursor.execute(query)
+            cursor.execute(query, tuple(params))
             rows = cursor.fetchall()
             
             # Update UI
@@ -3281,7 +3470,9 @@ class MainApp(QWidget):
                 # ID
                 self.video_table.setItem(row_idx, 0, QTableWidgetItem(str(row['id'])))
                 # Channel Name
-                self.video_table.setItem(row_idx, 1, QTableWidgetItem(str(row['channel_name'] or '')))
+                item_ch = QTableWidgetItem(str(row['channel_name'] or ''))
+                item_ch.setData(Qt.UserRole, row['channel_id'])
+                self.video_table.setItem(row_idx, 1, item_ch)
                 # Title
                 self.video_table.setItem(row_idx, 2, QTableWidgetItem(str(row['title'])))
                 
