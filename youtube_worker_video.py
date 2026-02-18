@@ -49,7 +49,7 @@ class VideoMergerWorker(QThread):
     def run(self):
         start_time = time.time()
         try:
-            # 오디오 파일 리스트 (.mp3)
+            # 오디오 파일 리스트 (.mp3)..
             if not os.path.exists(self.audio_dir):
                 self.error.emit("❌ 오디오 폴더를 찾을 수 없습니다.")
                 return
@@ -78,16 +78,22 @@ class VideoMergerWorker(QThread):
                 img_path = None
                 found_img_name = None
                 
+                # [Modified] Silence Detection
+                if "_silence" in base_name.lower():
+                    img_path = None
+                    self.log_signal.emit(f"ℹ️ 무음 파일 감지 (강제 블랙): {base_name}")
+                
                 # 1. 같은 이름의 이미지 검색
-                for ext in valid_exts:
-                    check_path = os.path.join(self.image_dir, base_name + ext)
-                    if os.path.exists(check_path):
-                        img_path = check_path
-                        found_img_name = base_name + ext
-                        break
+                elif not img_path: # Check only if not forced to None
+                    for ext in valid_exts:
+                        check_path = os.path.join(self.image_dir, base_name + ext)
+                        if os.path.exists(check_path):
+                            img_path = check_path
+                            found_img_name = base_name + ext
+                            break
                 
                 # [NEW] Multi-Image Check: If no base image, check if index-based images (1.jpg, etc.) exist
-                if not img_path:
+                if not img_path and "_silence" not in base_name.lower():
                     # Check for 1.jpg, 1.png etc. in image_dir (or a subfolder if user prefers)
                     # For now, check if 1.jpg exists in image_dir or in a subfolder named base_name
                     multi_img_detected = False
@@ -1181,7 +1187,7 @@ class BatchDubbingWorker(QThread):
         except Exception as e:
             self.error.emit(f"치명적 오류: {e}")
 
-class VideoConcatenatorWorkerOld(QThread):
+class VideoConcatenatorWorker(QThread):
     log_signal = pyqtSignal(str)
     finished = pyqtSignal(str, float)
     error = pyqtSignal(str)
@@ -1194,6 +1200,8 @@ class VideoConcatenatorWorkerOld(QThread):
 
     def run(self):
         start_time = time.time()
+        temp_files_to_clean = []
+
         try:
             try:
                 import imageio_ffmpeg
@@ -1214,23 +1222,37 @@ class VideoConcatenatorWorkerOld(QThread):
                 return
 
             self.log_signal.emit(f"🚀 총 {len(files)}개의 영상 합치기를 시작합니다 (Native FFmpeg)...")
+            
+            # [Step 1] Prepare Inputs & Generate Silence Videos
+            final_input_list = []
+            
+            for f in files:
+                path = os.path.join(self.video_dir, f).replace("\\", "/")
+                final_input_list.append(path)
+
+            self.log_signal.emit(f"📝 병합할 파일 목록 ({len(final_input_list)}개):")
+            for fp in final_input_list:
+                self.log_signal.emit(f"   - {os.path.basename(fp)}")
+
+            # [Step 2] Build FFmpeg Command
             if self.watermark_path:
                 self.log_signal.emit(f"   🖼️ 워터마크 적용: {os.path.basename(self.watermark_path)}")
             
             command = [ffmpeg_exe]
             
-            for f in files:
-                path = os.path.join(self.video_dir, f).replace("\\", "/")
+            for path in final_input_list:
                 command.extend(["-i", path])
             
             watermark_idx = -1
             if self.watermark_path and os.path.exists(self.watermark_path):
-                command.extend(["-i", self.watermark_path])
-                watermark_idx = len(files)
+                command.extend(["-loop", "1", "-i", self.watermark_path])
+                watermark_idx = len(final_input_list)
 
+            # [Step 3] Build Filter Complex
             filter_complex = ""
             
-            for i in range(len(files)):
+            for i in range(len(final_input_list)):
+                # Scale & Pad to 1920x1080 (consistent)
                 filter_complex += (f"[{i}:v]scale=1920:1080:force_original_aspect_ratio=decrease,"
                                    f"pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1:1,fps=30[v{i}];")
                 
@@ -1239,11 +1261,12 @@ class VideoConcatenatorWorkerOld(QThread):
             gap_duration = 0.2
             concat_inputs = []
             
-            for i in range(len(files)):
+            for i in range(len(final_input_list)):
                 v_source = f"[v{i}]"
                 a_source = f"[a{i}]"
                 
-                if i < len(files) - 1:
+                # Apply gap padding except for the very last clip
+                if i < len(final_input_list) - 1:
                      pad_v_label = f"[v{i}_pad]"
                      pad_a_label = f"[a{i}_pad]"
                      
@@ -1259,12 +1282,14 @@ class VideoConcatenatorWorkerOld(QThread):
             for label in concat_inputs:
                 filter_complex += label
             
-            filter_complex += f"concat=n={len(files)}:v=1:a=1[v_concat][out_a];"
+            filter_complex += f"concat=n={len(final_input_list)}:v=1:a=1[v_concat][out_a];"
             
             final_v_label = "[v_concat]"
             if watermark_idx != -1:
+                # Scale watermark first
                 filter_complex += f"[{watermark_idx}:v]scale=100:-1[wm];"
-                filter_complex += f"[v_concat][wm]overlay=20:20[v_final]"
+                # Apply overlay
+                filter_complex += f"[v_concat][wm]overlay=20:20:eof_action=repeat[v_final]"
                 final_v_label = "[v_final]"
             
             if filter_complex.endswith(";"): 
@@ -1273,6 +1298,7 @@ class VideoConcatenatorWorkerOld(QThread):
             command.extend(["-filter_complex", filter_complex])
             command.extend(["-map", final_v_label, "-map", "[out_a]"])
             
+            # Encoding options
             command.extend(["-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p"])
             command.extend(["-c:a", "aac", "-b:a", "192k"])
             
@@ -1297,14 +1323,89 @@ class VideoConcatenatorWorkerOld(QThread):
             
             if process.returncode != 0:
                 self.error.emit(f"❌ FFmpeg 오류: {stderr}")
-                return
-
-            elapsed = time.time() - start_time
-            self.finished.emit(f"✅ 최종 영상 합치기 완료: {os.path.basename(self.output_file)} (Native)", elapsed)
+                # Don't return here immediately, let finally run
+            else:
+                elapsed = time.time() - start_time
+                self.finished.emit(f"✅ 최종 영상 합치기 완료: {os.path.basename(self.output_file)} (Native)", elapsed)
 
         except Exception as e:
             self.error.emit(f"❌ 합치기 오류: {e}")
             traceback.print_exc()
+        finally:
+            # Cleanup temp files
+            for tp in temp_files_to_clean:
+                if os.path.exists(tp):
+                    try:
+                        os.remove(tp)
+                    except: pass
+
+    def create_silence_video_file(self, ffmpeg_exe, audio_path, output_path, ref_video=None):
+        try:
+            creation_flags = 0x08000000 if os.name == 'nt' else 0
+            
+            # [Added] Try to use the last frame of the reference video
+            image_input = "color=c=black:s=1920x1080:r=30" # Default black
+            is_image_file = False
+            last_frame_path = None
+            
+            if ref_video and os.path.exists(ref_video):
+                try:
+                    last_frame_path = output_path + ".png"
+                    # Extract last frame using -update 1 (requires frame count or similar, but -sseof via timeline is easier)
+                    # -sseof -0.1 might fail if too short. Safe approach:
+                    
+                    cmd_extract = [
+                        ffmpeg_exe, "-y",
+                        "-sseof", "-0.1", 
+                        "-i", ref_video, 
+                        "-frames:v", "1", 
+                        "-q:v", "1", 
+                        last_frame_path
+                    ]
+                    
+                    subprocess.run(cmd_extract, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, creationflags=creation_flags)
+                    
+                    if os.path.exists(last_frame_path):
+                        image_input = last_frame_path
+                        is_image_file = True
+                        self.log_signal.emit(f"   📸 마지막 장면 추출 성공: {os.path.basename(ref_video)}")
+                except Exception as e_extract:
+                    self.log_signal.emit(f"   ⚠️ 마지막 장면 추출 실패 (블랙 사용): {e_extract}")
+
+            # Build Command
+            cmd = [ffmpeg_exe, "-y"]
+            
+            if is_image_file:
+                # Loop image with explicit framerate
+                cmd.extend(["-loop", "1", "-framerate", "30", "-i", image_input])
+            else:
+                # Generated Black
+                cmd.extend(["-f", "lavfi", "-i", image_input])
+                
+            cmd.extend([
+                "-i", audio_path,
+                "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage", "-pix_fmt", "yuv420p",
+                "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1:1,fps=30",
+                "-c:a", "aac", "-b:a", "192k",
+                "-shortest",
+                output_path
+            ])
+            
+            # Use run to wait for completion
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, creationflags=creation_flags)
+            if proc.returncode != 0:
+                self.log_signal.emit(f"⚠️ 무음 영상 생성 실패 (FFmpeg Error): {proc.stderr.decode('utf-8', errors='ignore')[:200]}")
+                return False
+            
+            # Cleanup extracted frame
+            if last_frame_path and os.path.exists(last_frame_path):
+                try: os.remove(last_frame_path)
+                except: pass
+                
+            return True
+        except Exception as e:
+            self.log_signal.emit(f"⚠️ 무음 영상 생성 실패: {e}")
+            return False
 
 class GoldShortsWorker(QThread):
     log_signal = pyqtSignal(str)
@@ -1383,12 +1484,16 @@ class GoldShortsWorker(QThread):
                     
                     # Timestamp filename
                     ts = datetime.now().strftime("%Y%m%d%H%M")
+                    
                     # Append index to avoid overwrite if multiple processed in same minute
                     if total > 1:
                         output_filename = f"Gold_Shorts_{ts}_{idx+1}.mp4"
                     else:
                         output_filename = f"Gold_Shorts_{ts}.mp4"
                         
+                    output_path = os.path.join(self.output_dir, output_filename)
+                    
+                    # Skip silence files from Shorts generation
                     output_path = os.path.join(self.output_dir, output_filename)
                     
                     self.log_signal.emit(f"🎬 [{idx+1}/{total}] 영상 생성 중: {base_name}")
