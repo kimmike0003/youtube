@@ -182,6 +182,11 @@ class MainApp(QWidget):
         self.initTab3()
         self.tabs.addTab(self.tab3, "자막설정")
 
+        # 8. Grok Generation (Moved to here)
+        self.tab_grok_gen = QWidget()
+        self.initTabGrokGen()
+        self.tabs.addTab(self.tab_grok_gen, "그록생성")
+
         # 5. Video Dubbing
         self.tab6 = QWidget()
         self.initTab6()
@@ -200,10 +205,7 @@ class MainApp(QWidget):
         self.initTab4()
         self.tabs.addTab(self.tab4, "최종영상")
 
-        # 8. Grok Generation (New)
-        self.tab_grok_gen = QWidget()
-        self.initTabGrokGen()
-        self.tabs.addTab(self.tab_grok_gen, "그록생성")
+
 
         # 8. Audio To Video
         self.tab_audio_video = QWidget()
