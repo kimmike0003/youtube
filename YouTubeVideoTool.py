@@ -202,7 +202,6 @@ class MainApp(QWidget):
         # 7. Video Concat
         self.tab4 = QWidget()
         self.initTab4()
-        self.initTab4()
         self.tabs.addTab(self.tab4, "최종영상")
 
 
@@ -727,7 +726,7 @@ class MainApp(QWidget):
 
         self.concat_input_dir = QLineEdit(r"D:\youtube")
         btn_browse_input = QPushButton("영상 폴더 선택")
-        btn_browse_input.clicked.connect(lambda: self.browse_folder(self.concat_input_dir))
+        btn_browse_input.clicked.connect(self.browse_concat_input_folder)
         
         path_layout.addWidget(QLabel("입력 영상 폴더:"), 0, 0)
         path_layout.addWidget(self.concat_input_dir, 0, 1)
@@ -752,7 +751,6 @@ class MainApp(QWidget):
         path_layout.addWidget(self.watermark_path, 2, 1)
         path_layout.addWidget(btn_browse_wm, 2, 2)
 
-        path_group.setLayout(path_layout)
         path_group.setLayout(path_layout)
         layout.addWidget(path_group)
 
@@ -1308,6 +1306,34 @@ class MainApp(QWidget):
                     subs[major_id].append({"original": content, "tts": content})
                     
         return subs
+
+    def browse_concat_input_folder(self):
+        path = QFileDialog.getExistingDirectory(self, "영상 폴더 선택")
+        if path:
+            self.concat_input_dir.setText(path)
+            
+            # 최종 파일 경로 자동 설정 (선택된 폴더/final_video.mp4)
+            # 사용자 요청: 최종파일도 입력 영상 폴더 선택 하면 거기 부터 시작 해야 됨
+            final_path = os.path.join(path, "final_video.mp4")
+            self.concat_output_file.setText(final_path)
+            
+            # 워터마크 경로 자동 설정 (선택된 폴더/logo.png 등)
+            # 사용자 요청: 워터마크경로도 동일하게
+            found_logo = None
+            for name in ["logo.png", "logo.jpg", "logo.jpeg", "watermark.png"]:
+                check_p = os.path.join(path, name)
+                if os.path.exists(check_p):
+                    found_logo = check_p
+                    break
+            
+            if found_logo:
+                self.watermark_path.setText(found_logo)
+            else:
+                 # 없으면 비워둘지, 아니면 해당 폴더 경로로 잡을지?
+                 # 워터마크는 파일 경로여야 하므로 폴더만 잡을 순 없음.
+                 # 파일이 없으면 기존값 유지하거나 안내
+                 # 여기서는 파일이 없는 경우엔 변경 안함
+                 pass
 
     def browse_folder(self, line_edit, callback=None):
         path = QFileDialog.getExistingDirectory(self, "폴더 선택")
