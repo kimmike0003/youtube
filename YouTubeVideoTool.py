@@ -742,7 +742,7 @@ class MainApp(QWidget):
         
         # 워터마크 선택 (New)
         self.watermark_path = QLineEdit()
-        self.watermark_path.setText(r"D:\youtube\logo")
+        self.watermark_path.setText("")
         self.watermark_path.setPlaceholderText("워터마크 이미지 (선택 사항)")
         btn_browse_wm = QPushButton("워터마크 선택")
         btn_browse_wm.clicked.connect(lambda: self.browse_single_file(self.watermark_path, "Images (*.png *.jpg)"))
@@ -804,15 +804,16 @@ class MainApp(QWidget):
         file_layout.addWidget(self.eff_input_dir, 0, 1)
         file_layout.addWidget(btn_browse_in, 0, 2)
 
-        # 출력 폴더
+        # 출력 폴더 (숨김 처리 - 자동경로 사용)
         self.eff_output_dir = QLineEdit()
-        self.eff_output_dir.setPlaceholderText("결과물(.mp4) 저장 폴더")
-        btn_browse_out = QPushButton("출력 폴더 선택")
-        btn_browse_out.clicked.connect(lambda: self.browse_folder(self.eff_output_dir))
+        self.eff_output_dir.setPlaceholderText("결과물 ../output 에 자동 저장")
+        self.eff_output_dir.setReadOnly(True)
+        # btn_browse_out = QPushButton("출력 폴더 선택")
+        # btn_browse_out.clicked.connect(lambda: self.browse_folder(self.eff_output_dir))
         
-        file_layout.addWidget(QLabel("출력(저장) 폴더:"), 1, 0)
+        file_layout.addWidget(QLabel("저장 경로:"), 1, 0)
         file_layout.addWidget(self.eff_output_dir, 1, 1)
-        file_layout.addWidget(btn_browse_out, 1, 2)
+        # file_layout.addWidget(btn_browse_out, 1, 2)
 
         file_group.setLayout(file_layout)
         layout.addWidget(file_group)
@@ -1156,11 +1157,20 @@ class MainApp(QWidget):
             QMessageBox.warning(self, "경고", "입력 영상 폴더가 존재하지 않습니다.")
             return
 
+        # [Fix] 워터마크 경로가 유효한 파일인지 확인 (아니면 무시)
+        final_wm_path = None
+        if wm_path:
+            if os.path.isfile(wm_path):
+                final_wm_path = wm_path
+                self.concat_log.append(f"ℹ️ 워터마크 적용: {os.path.basename(final_wm_path)}")
+            else:
+                self.concat_log.append(f"ℹ️ 워터마크 경로가 비어있거나 파일이 아닙니다. 워터마크 없이 진행합니다.")
+        
         self.btn_start_concat.setEnabled(False)
         self.btn_stop_concat.setEnabled(True)
         self.concat_log.append("⏳ 영상 합치기 작업을 시작합니다...")
 
-        self.concat_worker = VideoConcatenatorWorker(in_dir, out_file, wm_path) # Pass wm_path
+        self.concat_worker = VideoConcatenatorWorker(in_dir, out_file, final_wm_path) # Pass validated path
         self.concat_worker.log_signal.connect(self.concat_log.append)
         self.concat_worker.finished.connect(self.on_video_concat_finished)
         self.concat_worker.error.connect(lambda e: [self.concat_log.append(f"❌ 오류: {e}"), self.btn_start_concat.setEnabled(True), self.btn_stop_concat.setEnabled(False)])
@@ -2425,21 +2435,21 @@ class MainApp(QWidget):
 
     def start_batch_video_effect(self):
         input_dir = self.eff_input_dir.text().strip()
-        output_dir = self.eff_output_dir.text().strip()
+        # output_dir = self.eff_output_dir.text().strip() (Removed)
         
         if not input_dir or not os.path.exists(input_dir):
             QMessageBox.warning(self, "경고", "입력 폴더가 존재하지 않습니다.")
             return
-            
-        if not output_dir:
-            QMessageBox.warning(self, "경고", "출력 폴더를 지정해주세요.")
-            return
-            
+
+        # [Auto] ../output 경로 설정
+        output_dir = os.path.abspath(os.path.join(input_dir, "..", "output"))
+        self.eff_output_dir.setText(output_dir) # UI 표시
+
         if not os.path.exists(output_dir):
             try:
                 os.makedirs(output_dir)
             except:
-                QMessageBox.warning(self, "경고", "출력 폴더를 생성할 수 없습니다.")
+                QMessageBox.warning(self, "경고", "출력 폴더(output)를 생성할 수 없습니다.")
                 return
 
         # 설정값 읽기
@@ -5077,9 +5087,9 @@ class VideoConcatenatorWorker(QThread):
             
             map_options = []
             
-            if self.watermark_path and os.path.exists(self.watermark_path):
+            if self.watermark_path and os.path.isfile(self.watermark_path):
                 command.extend(["-i", self.watermark_path])
-                filter_complex = "[1:v]scale=100:-1[wm];[0:v][wm]overlay=20:20[v_out]"
+                filter_complex = "[1:v]scale=200:-1[wm];[0:v][wm]overlay=main_w-overlay_w-20:20[v_out]"
                 command.extend(["-filter_complex", filter_complex])
                 map_options = ["-map", "[v_out]", "-map", "0:a"]
             else:

@@ -1135,7 +1135,9 @@ class BatchDubbingWorker(QThread):
     def run(self):
         start_time = time.time()
         try:
-            output_dir = os.path.join(self.input_dir, "output")
+            # output_dir = os.path.join(self.input_dir, "output")
+            # Changed to ../output as requested
+            output_dir = os.path.abspath(os.path.join(self.input_dir, "..", "output"))
             os.makedirs(output_dir, exist_ok=True)
             
             if not os.path.exists(self.input_dir):
@@ -1244,7 +1246,7 @@ class VideoConcatenatorWorker(QThread):
                 command.extend(["-i", path])
             
             watermark_idx = -1
-            if self.watermark_path and os.path.exists(self.watermark_path):
+            if self.watermark_path and os.path.isfile(self.watermark_path):
                 command.extend(["-loop", "1", "-i", self.watermark_path])
                 watermark_idx = len(final_input_list)
 
@@ -1286,10 +1288,10 @@ class VideoConcatenatorWorker(QThread):
             
             final_v_label = "[v_concat]"
             if watermark_idx != -1:
-                # Scale watermark first
-                filter_complex += f"[{watermark_idx}:v]scale=100:-1[wm];"
-                # Apply overlay
-                filter_complex += f"[v_concat][wm]overlay=20:20:eof_action=repeat[v_final]"
+                # Scale watermark first (2배 확대: 200px)
+                filter_complex += f"[{watermark_idx}:v]scale=200:-1[wm];"
+                # Apply overlay (Top-Right: W-w-20:20)
+                filter_complex += f"[v_concat][wm]overlay=main_w-overlay_w-20:20:eof_action=repeat[v_final]"
                 final_v_label = "[v_final]"
             
             if filter_complex.endswith(";"): 
