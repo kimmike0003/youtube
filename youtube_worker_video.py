@@ -413,7 +413,7 @@ class VideoMergerWorker(QThread):
                  # Video Input Mode: Loop infinitely, will be trimmed by -t at output
                  command.extend(["-stream_loop", "-1", "-i", img_path])
             elif img_path and os.path.exists(img_path) and img_path != "MULTI_IMAGE_MODE":
-                command.extend(["-loop", "1", "-t", f"{final_duration:.6f}", "-i", img_path])
+                command.extend(["-loop", "1", "-framerate", "30", "-t", f"{final_duration:.6f}", "-i", img_path])
             else:
                 # 검정 배경 생성 (lavfi color filter 사용)
                 command.extend(["-f", "lavfi", "-i", f"color=c=black:s={TARGET_W}x{TARGET_H}:r={FPS}:d={final_duration:.6f}"])
@@ -480,16 +480,14 @@ class VideoMergerWorker(QThread):
                 # Ensure it fills the screen (increase) then crop
                 filter_parts.append(f"[0:v]fps={FPS},scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=idea,crop={TARGET_W}:{TARGET_H},setsar=1:1[v_bg]")
                 # Using 'idea' isn't standard in ffmpeg scale? standardized: 'increase' then crop
-                # Correct logic: scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920
                 # Overwriting previous line logic
                 filter_parts.pop() 
                 filter_parts.append(f"[0:v]fps={FPS},scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=increase,crop={TARGET_W}:{TARGET_H},setsar=1:1[v_bg]")
 
             elif img_path and os.path.exists(img_path) and img_path != "MULTI_IMAGE_MODE":
                 # Effect Config (Zoom/Pan)
-                # [Anti-Jitter] 8K(7680x4320) Ultra-Supersampling
-                SUPER_W, SUPER_H = 7680, 4320
-                filter_parts.append(f"[0:v]scale={SUPER_W}:{SUPER_H}:flags=bicubic,setsar=1:1,fps={FPS}[v_high]")
+                # [Anti-Jitter] Moderate (2K) Supersampling inside zoompan
+                SUPER_W, SUPER_H = 2560, 1440
                 
                 # Zoom/Pan Expression
                 start_scale = effect_config.get('start_scale', 1.0) if effect_config else 1.0
@@ -500,28 +498,30 @@ class VideoMergerWorker(QThread):
                 z_expr = "1"; x_expr = "0"; y_expr = "0"
                 if effect_type == 1: # Zoom (Unified)
                     denom = total_frames - 1 if total_frames > 1 else 1
-                    z_expr = f"{start_scale}+({end_scale}-{start_scale})*on/{denom}"
-                    x_expr = "(iw-iw/zoom)/2"
-                    y_expr = "(ih-ih/zoom)/2"
+                    # Use a stable progress multiplier, start from start_scale to end_scale
+                    progress_step = (end_scale - start_scale) / denom * 0.25
+                    z_expr = f"{start_scale}+(on*{progress_step})"
+                    x_expr = "(iw-iw/z)/2"
+                    y_expr = "(ih-ih/z)/2"
                 elif effect_type == 2: # Pan Left -> Right
                     pan_z = max(start_scale, 1.05)
-                    p_speed = effect_config.get('pan_speed', 1.0)
+                    p_speed = effect_config.get('pan_speed', 1.0) * 0.15
                     z_expr = f"{pan_z}"
                     denom = total_frames - 1 if total_frames > 1 else 1
-                    progress_expr = f"(on*{p_speed}/{denom})"
-                    x_expr = f"(iw-iw/zoom)*(1-min(1,{progress_expr}))"
-                    y_expr = "ih/2-(ih/2/zoom)"
+                    x_step = ((1.0-1.0/pan_z)*iw) / denom * p_speed
+                    x_expr = f"min(on*{x_step}, iw-iw/z)"
+                    y_expr = "ih/2-(ih/z/2)"
                 elif effect_type == 3: # Pan Right -> Left
                     pan_z = max(start_scale, 1.05)
-                    p_speed = effect_config.get('pan_speed', 1.0)
+                    p_speed = effect_config.get('pan_speed', 1.0) * 0.15
                     z_expr = f"{pan_z}"
                     denom = total_frames - 1 if total_frames > 1 else 1
-                    progress_expr = f"(on*{p_speed}/{denom})"
-                    x_expr = f"(iw-iw/zoom)*min(1,{progress_expr})"
-                    y_expr = "ih/2-(ih/2/zoom)"
+                    x_step = ((1.0-1.0/pan_z)*iw) / denom * p_speed
+                    x_expr = f"max((iw-iw/z)-(on*{x_step}), 0)"
+                    y_expr = "ih/2-(ih/z/2)"
                 
-                filter_parts.append(f"[v_high]zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={SUPER_W}x{SUPER_H}:fps={FPS}[v_zoomed]")
-                # 최종적으로 4K에서 1080p로 다운스케일
+                filter_parts.append(f"[0:v]trim=start_frame=0:end_frame=1,zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d={total_frames}:s={SUPER_W}x{SUPER_H}:fps={FPS}[v_zoomed]")
+                # 최종적으로 2K에서 1080p로 다운스케일
                 filter_parts.append(f"[v_zoomed]scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=decrease:flags=lanczos,pad={TARGET_W}:{TARGET_H}:(ow-iw)/2:(oh-ih)/2,setsar=1:1[v_bg]")
             else:
                 filter_parts.append(f"[0:v]fps={FPS},setsar=1:1[v_bg]")
@@ -551,7 +551,7 @@ class VideoMergerWorker(QThread):
             command.extend(["-map", final_v_label, "-map", "[a_out]"])
             
             # Encoding Options
-            command.extend(["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p"])
+            command.extend(["-c:v", "libx264", "-preset", "fast", "-crf", "23", "-pix_fmt", "yuv420p"])
             command.extend(["-c:a", "aac", "-b:a", "192k"])
             # Strictly limit output duration to audio length
             command.extend(["-t", f"{final_duration:.6f}"])
@@ -1511,9 +1511,9 @@ class GoldShortsWorker(QThread):
                     # 1: Audio
                     cmd.extend(["-i", audio_path])
                     # 2: Header Image (Loop)
-                    cmd.extend(["-loop", "1", "-i", header_path])
+                    cmd.extend(["-loop", "1", "-framerate", "30", "-i", header_path])
                     # 3: Footer Image (Loop)
-                    cmd.extend(["-loop", "1", "-i", footer_path])
+                    cmd.extend(["-loop", "1", "-framerate", "30", "-i", footer_path])
                     
                     # 4: Background Music (Loop) if exists
                     has_bg_music = False
