@@ -5316,12 +5316,13 @@ class AudioToVideoWorker(QThread):
         import random
         start_time = time.time()
         try:
-            # 1. FFmpeg 준비
             try:
                 import imageio_ffmpeg
                 ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
             except:
                 ffmpeg_exe = "ffmpeg"
+            
+            creation_flags = 0x08000000 if os.name == 'nt' else 0
                 
             # 2. 파일 목록 및 SRT 로드
             files = os.listdir(self.target_dir)
@@ -5393,29 +5394,31 @@ class AudioToVideoWorker(QThread):
                 # 첫 시작점 보정
                 checkpoints[0]['start'] = 0.0
 
-            # 조각 생성 루프
-            ts_list = []
+            # 조각 생성 루프 (병렬 처리 적용)
+            from concurrent.futures import ThreadPoolExecutor
+            ts_list = [None] * len(checkpoints)
             FPS_OUT = 30
             UW, UH = 2560, 1440 # 줌용 고해상도
             VW, VH = 1920, 1080 # 최종 출력
+            
+            # GPU 가속은 사용하지 않음 (사용자 요청)
+            use_nvenc = False
 
-            for i, cp in enumerate(checkpoints):
+            def create_chunk(idx, cp):
                 start_t = cp['start']
-                end_t = checkpoints[i+1]['start'] if i < len(checkpoints)-1 else duration
-                if end_t <= start_t: continue
+                end_t = checkpoints[idx+1]['start'] if idx < len(checkpoints)-1 else duration
+                if end_t <= start_t: return None
                 
                 dur = end_t - start_t
-                ts_path = os.path.join(unified_video_dir, f"chunk_{i}.ts")
+                ts_path = os.path.join(unified_video_dir, f"chunk_{idx}.ts")
                 src = cp['source']
                 is_vid = src.lower().endswith(('.mp4', '.mov', '.avi', '.mkv', '.wmv'))
                 
-                cmd = [ffmpeg_exe, "-y"]
+                cmd = [ffmpeg_exe, "-y", "-threads", "1"] # 병렬 효율을 위해 개별 인스턴스는 1스레드
                 if is_vid:
-                    # [영상] 좌우 줌 없이 그대로 재생 (사용자 요청 반영)
                     cmd.extend(["-stream_loop", "-1", "-i", src])
                     vf = f"scale={VW}:{VH}:force_original_aspect_ratio=decrease,pad={VW}:{VH}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p"
                 else:
-                    # [이미지] web_toon_manager 스타일 줌팬 적용
                     cmd.extend(["-loop", "1", "-i", src])
                     z_speed, p_speed = 0.00015, 0.2
                     effect_idx = random.randint(0, 2)
@@ -5433,17 +5436,33 @@ class AudioToVideoWorker(QThread):
                         f"scale={VW}:{VH}:flags=lanczos,format=yuv420p,fps={FPS_OUT}"
                     )
                 
+                # 엔코더 선택 (CPU 전용)
+                v_codec = "libx264"
+                preset = "ultrafast"
+                
                 cmd.extend([
-                    "-t", str(dur),
+                    "-t", f"{dur:.3f}",
                     "-vf", vf,
-                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-r", str(FPS_OUT),
+                    "-c:v", v_codec, "-preset", preset, "-pix_fmt", "yuv420p", "-r", str(FPS_OUT),
                     "-an", ts_path
                 ])
                 
-                creation_flags = 0x08000000 if os.name == 'nt' else 0
                 subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, creationflags=creation_flags)
-                ts_list.append(ts_path)
-                self.log_signal.emit(f"  ∟ 조각 생성: {os.path.basename(src)} ({dur:.2f}초)")
+                return ts_path
+
+            # 최대 코어 수 고려 병렬 실행
+            max_w = min(os.cpu_count() or 4, 8)
+            self.log_signal.emit(f"⚙️ 조각 병렬 생성 시작 (스케줄: {max_w}개)...")
+            
+            with ThreadPoolExecutor(max_workers=max_w) as exp:
+                futures = [exp.submit(create_chunk, i, cp) for i, cp in enumerate(checkpoints)]
+                for i, fut in enumerate(futures):
+                    res_path = fut.result()
+                    if res_path:
+                        ts_list[i] = res_path
+                        self.log_signal.emit(f"  ∟ 조각 {i+1}/{len(checkpoints)} 완료")
+            
+            ts_list = [t for t in ts_list if t is not None]
 
             # 7. 최종 합성 (비디오 조각 + 오디오 + 자막 필터)
             concat_list_p = os.path.join(self.temp_sub_dir, "concat.txt")
@@ -5519,12 +5538,16 @@ class AudioToVideoWorker(QThread):
                 sub_filter += f":fontsdir='{f_folder}'"
             sub_filter += f":force_style='{force_style}'"
 
+            # 최종 인코더 및 프리셋 설정 (CPU 전용)
+            v_codec_final = "libx264"
+            final_preset = "fast" 
+            
             cmd_final = [
                 ffmpeg_exe, "-y",
                 "-f", "concat", "-safe", "0", "-i", concat_list_p,
                 "-i", mp3_path,
                 "-filter_complex", sub_filter,
-                "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+                "-c:v", v_codec_final, "-preset", final_preset, "-crf", "20",
                 "-c:a", "aac", "-b:a", "192k", "-shortest",
                 out_path
             ]
