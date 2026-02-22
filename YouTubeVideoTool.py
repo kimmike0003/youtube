@@ -1335,15 +1335,34 @@ class MainApp(QWidget):
         
         # 4. 드롭다운 목록 업데이트 (메인 탭, ATV 탭, Thumbnail 탭)
         combos = [self.combo_font]
-        if hasattr(self, 'atv_combo_font'): combos.append(self.atv_combo_font)
+        if hasattr(self, 'atv_combo_font'):
+            combos.append(self.atv_combo_font)
+            # 영상생성 탭 폰트 변경 시 썸네일 폰트 자동 동기화 연결
+            try:
+                self.atv_combo_font.currentIndexChanged.disconnect(self.sync_thumbnail_fonts)
+            except: pass
+            self.atv_combo_font.currentIndexChanged.connect(self.sync_thumbnail_fonts)
         
         # 썸네일 탭의 각 줄 콤보박스 찾기
         if hasattr(self, 'thumb_lines'):
             for line_data in self.thumb_lines:
-                if 'font_combo' in line_data:
-                    combos.append(line_data['font_combo'])
+                if 'font' in line_data: # 수정: 'font_combo' -> 'font'
+                    combos.append(line_data['font'])
         
+        # 시스템 폰트 경로 보강 (한글 깨짐 방지용)
+        sys_fonts = {
+            "Malgun Gothic": r"C:\Windows\Fonts\malgun.ttf",
+            "맑은 고딕": r"C:\Windows\Fonts\malgun.ttf",
+            "NanumGothic": r"C:\Windows\Fonts\NanumGothic.ttf",
+            "Batang": r"C:\Windows\Fonts\batang.ttc",
+            "Gulim": r"C:\Windows\Fonts\gulim.ttc"
+        }
+        for fam, p in sys_fonts.items():
+            if fam not in self.font_path_map and os.path.exists(p):
+                self.font_path_map[fam] = p
+
         for cb in combos:
+            cb.blockSignals(True) # 무한 루프 방지
             cb.clear()
             if matched_families:
                 final_list = sorted(list(matched_families))
@@ -1354,7 +1373,7 @@ class MainApp(QWidget):
                 # 1순위: Gmarket Sans TTF Bold (정확한 매칭 시도)
                 for i in range(cb.count()):
                     text = cb.itemText(i)
-                    if "Gmarket Sans" in text and "Bold" in text:
+                    if "Gmarket" in text and "Bold" in text:
                         cb.setCurrentIndex(i)
                         target_set = True
                         break
@@ -1362,24 +1381,38 @@ class MainApp(QWidget):
                 # 2순위: Gmarket Sans
                 if not target_set:
                     for i in range(cb.count()):
-                        if "Gmarket Sans" in cb.itemText(i):
-                            cb.setCurrentIndex(i); target_set = True; break
-                
-                # 3순위: Gmarket (일반)
-                if not target_set:
-                    for i in range(cb.count()):
                         if "Gmarket" in cb.itemText(i):
                             cb.setCurrentIndex(i); target_set = True; break
                 
-                # 4순위: Nanum
+                # 3순위: Nanum
                 if not target_set:
                     for i in range(cb.count()):
                         if "Nanum" in cb.itemText(i):
+                            cb.setCurrentIndex(i); target_set = True; break
+                            
+                # 4순위: Malgun
+                if not target_set:
+                    for i in range(cb.count()):
+                        if "Malgun" in cb.itemText(i) or "맑은" in cb.itemText(i):
                             cb.setCurrentIndex(i); break
             else:
                 fallback_fonts = ["Malgun Gothic", "맑은 고딕", "Arial"]
                 available_fallbacks = [f for f in fallback_fonts if f in all_families]
                 cb.addItems(available_fallbacks if available_fallbacks else ["Arial"])
+            cb.blockSignals(False)
+
+    def sync_thumbnail_fonts(self, index):
+        """영상생성(ATV) 탭의 폰트 변경 시 모든 썸네일 줄의 폰트를 동일하게 변경"""
+        if not hasattr(self, 'atv_combo_font') or not hasattr(self, 'thumb_lines'):
+            return
+            
+        selected_font = self.atv_combo_font.currentText()
+        for line_data in self.thumb_lines:
+            if 'font' in line_data:
+                cb = line_data['font']
+                idx = cb.findText(selected_font)
+                if idx >= 0:
+                    cb.setCurrentIndex(idx)
                         
         else:
             # 매칭되는 게 없을 때의 폴백
@@ -4634,11 +4667,15 @@ class MainApp(QWidget):
                         pass
                 
                 if font is None:
-                    # Try system font or default
+                    # 1순위 폴백: 맑은 고딕 (한글 깨짐 방지용)
                     try:
-                        font = ImageFont.truetype("arial.ttf", font_size)
+                        font = ImageFont.truetype(r"C:\Windows\Fonts\malgun.ttf", font_size)
                     except:
-                        font = ImageFont.load_default()
+                        # 2순위: Arial
+                        try:
+                            font = ImageFont.truetype("arial.ttf", font_size)
+                        except:
+                            font = ImageFont.load_default()
                 
                 # Calculate Position
                 # Centered Horizontally, Y based on percentage
