@@ -26,6 +26,174 @@ except ImportError:
 if not hasattr(Image, 'ANTIALIAS'):
     Image.ANTIALIAS = Image.LANCZOS
 
+class AudioSrtMergerWorker(QThread):
+    progress = pyqtSignal(str)
+    log_signal = pyqtSignal(str)
+    finished = pyqtSignal(str, float)
+    error = pyqtSignal(str)
+
+    def __init__(self, folder_path):
+        super().__init__()
+        self.folder_path = folder_path
+
+    def run(self):
+        start_time = time.time()
+        try:
+            # 1. 파일 목록 및 정렬
+            files = [f for f in os.listdir(self.folder_path) if f.lower().endswith('.mp3')]
+            
+            def natural_keys(text):
+                return [int(c) if c.isdigit() else c for c in re.split(r'(\d+)', text)]
+            files.sort(key=natural_keys)
+            
+            if not files:
+                self.error.emit("❌ 합칠 MP3 파일이 없습니다.")
+                return
+
+            self.log_signal.emit(f"🚀 {len(files)}개의 MP3 파일 합치기를 시작합니다.")
+
+            # 2. MP3 합치기 (FFmpeg concat)
+            concat_list_path = os.path.join(self.folder_path, "mp3_concat_list.txt")
+            with open(concat_list_path, "w", encoding="utf-8") as f:
+                for fname in files:
+                    # FFmpeg concat demuxer requires escaping or simple names
+                    f.write(f"file '{fname}'\n")
+
+            output_mp3 = os.path.join(self.folder_path, "merge.mp3")
+            
+            ffmpeg_exe = "ffmpeg"
+            try:
+                import imageio_ffmpeg
+                ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+            except: pass
+
+            cmd = [ffmpeg_exe, "-y", "-f", "concat", "-safe", "0", "-i", concat_list_path, "-c", "copy", output_mp3]
+            creation_flags = 0x08000000 if os.name == 'nt' else 0
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=creation_flags)
+            
+            if os.path.exists(concat_list_path):
+                os.remove(concat_list_path)
+
+            self.log_signal.emit("✅ MP3 합치기 완료: merge.mp3")
+
+            # 3. SRT 합치기
+            srt_files_exist = any(os.path.exists(os.path.join(self.folder_path, f.replace('.mp3', '.srt'))) for f in files)
+
+            if srt_files_exist:
+                self.log_signal.emit("🚀 SRT 파일 합치기를 시작합니다. (타임스탬프 계산 중...)")
+                merged_srt_content = []
+                cumulative_offset = 0.0
+                current_index = 1
+
+                for fname in files:
+                    mp3_path = os.path.join(self.folder_path, fname)
+                    srt_path = mp3_path.replace('.mp3', '.srt')
+                    
+                    # 현재 MP3 길이 측정 (SRT offset 계산용)
+                    duration = self.get_audio_duration(mp3_path)
+
+                    if os.path.exists(srt_path):
+                        segments = self.parse_srt_local(srt_path)
+                        for seg in segments:
+                            # 타임스탬프 오프셋 적용
+                            start = seg['start'] + cumulative_offset
+                            end = seg['end'] + cumulative_offset
+                            
+                            # SRT 블록 생성
+                            merged_srt_content.append(f"{current_index}")
+                            merged_srt_content.append(f"{self.format_time(start)} --> {self.format_time(end)}")
+                            merged_srt_content.append(f"{seg['text']}\n")
+                            
+                            current_index += 1
+                    
+                    cumulative_offset += duration
+
+                output_srt = os.path.join(self.folder_path, "merge.srt")
+                with open(output_srt, "w", encoding="utf-8") as f:
+                    f.write("\n".join(merged_srt_content))
+                
+                self.log_signal.emit(f"✅ SRT 합치기 완료: merge.srt (총 {current_index-1}개 트랙)")
+            else:
+                self.log_signal.emit("ℹ️ SRT 파일이 발견되지 않아 MP3만 합쳤습니다.")
+
+            elapsed = time.time() - start_time
+            self.finished.emit("합치기 작업이 성공적으로 완료되었습니다.", elapsed)
+
+        except Exception as e:
+            self.error.emit(f"합치기 중 오류: {e}")
+            traceback.print_exc()
+
+    def get_audio_duration(self, path):
+        try:
+            # Soundfile is usually fastest
+            import soundfile as sf
+            f = sf.SoundFile(path)
+            dur = len(f) / f.samplerate
+            f.close()
+            return dur
+        except:
+            try:
+                if mpe:
+                    audio = mpe.AudioFileClip(path)
+                    dur = audio.duration
+                    audio.close()
+                    return dur
+                return 0.0
+            except:
+                return 0.0
+
+    def parse_srt_local(self, srt_path):
+        segments = []
+        try:
+            with open(srt_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except:
+            try:
+                with open(srt_path, 'r', encoding='cp949') as f:
+                    content = f.read()
+            except:
+                return []
+            
+        blocks = content.strip().split('\n\n')
+        for block in blocks:
+            lines = block.strip().split('\n')
+            if len(lines) >= 3:
+                try:
+                    # lines[0]: Index, lines[1]: Time, lines[2:]: Text
+                    time_line = lines[1].strip()
+                    text = "\n".join(lines[2:])
+                    
+                    if '-->' in time_line:
+                        s_str, e_str = time_line.split('-->')
+                        start = self.parse_time_local(s_str.strip())
+                        end = self.parse_time_local(e_str.strip())
+                        
+                        segments.append({
+                            'start': start,
+                            'end': end,
+                            'text': text
+                        })
+                except:
+                    pass
+        return segments
+
+    def parse_time_local(self, t_str):
+        t_str = t_str.replace(',', '.')
+        parts = t_str.split(':')
+        if len(parts) == 3:
+            h = float(parts[0])
+            m = float(parts[1])
+            s = float(parts[2])
+            return h*3600 + m*60 + s
+        return 0.0
+
+    def format_time(self, seconds):
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        s = seconds % 60
+        ms = int((s - int(s)) * 1000)
+        return f"{h:02d}:{m:02d}:{int(s):02d},{ms:03d}"
+
 class VideoMergerWorker(QThread):
     progress = pyqtSignal(str)
     log_signal = pyqtSignal(str)

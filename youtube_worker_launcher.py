@@ -30,6 +30,11 @@ class BrowserLauncherWorker(QThread):
                 target_url = "https://labs.google/fx/ko/tools/image-fx"
                 target_url = "https://labs.google/fx/ko/tools/image-fx"
                 port = 9223
+            elif self.browser_type == 'whisk':
+                self.log_signal.emit("🌐 Whisk AI용 브라우저를 실행합니다...")
+                user_data = r'C:\sel_chrome_whisk'
+                target_url = "https://labs.google/fx/tools/whisk/project"
+                port = 9224
             elif self.browser_type == 'grok':
                 self.log_signal.emit("🌐 Grok용 브라우저를 실행합니다...")
                 target_url = "https://grok.com/imagine"

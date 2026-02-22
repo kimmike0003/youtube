@@ -1,4 +1,5 @@
 import sys
+import math
 import requests
 import subprocess
 import os
@@ -48,8 +49,8 @@ import moviepy.editor as mpe
 from youtube_workers import YoutubeSearchWorker, ImageLoadWorker
 
 
-from youtube_worker_ai import GenSparkMultiTabWorker, GrokMultiTabWorker
-from youtube_worker_video import VideoMergerWorker, SingleVideoWorker, VideoDubbingWorker, BatchDubbingWorker, VideoConcatenatorWorker
+from youtube_worker_ai import GenSparkMultiTabWorker, GrokMultiTabWorker, WhiskMultiTabWorker
+from youtube_worker_video import VideoMergerWorker, SingleVideoWorker, VideoDubbingWorker, BatchDubbingWorker, VideoConcatenatorWorker, AudioSrtMergerWorker
 from youtube_worker_launcher import BrowserLauncherWorker
 
 class CustomTabWidget(QWidget):
@@ -178,6 +179,11 @@ class MainApp(QWidget):
         self.initTab1()
         self.tabs.addTab(self.tab1, "Ganspark Image")
 
+        # 2-1. Whisk Image
+        self.tab_whisk_image = QWidget()
+        self.initTabWhiskImage()
+        self.tabs.addTab(self.tab_whisk_image, "Whisk Image")
+
         # 3. 그록생성
         self.tab_grok_gen = QWidget()
         self.initTabGrokGen()
@@ -234,6 +240,21 @@ class MainApp(QWidget):
         self.tab7 = QWidget()
         self.initTab7()
         self.tabs.addTab(self.tab7, "YouTube 분석")
+
+        # 14. 소설대본
+        self.tab_novel_script = QWidget()
+        self.initTabNovelScript()
+        self.tabs.addTab(self.tab_novel_script, "소설대본")
+
+        # 15. 인트로
+        self.tab_intro = QWidget()
+        self.initTabIntro()
+        self.tabs.addTab(self.tab_intro, "인트로")
+
+        # 16. 소설 썸네일
+        self.tab_novel_thumbnail = QWidget()
+        self.initTabNovelThumbnail()
+        self.tabs.addTab(self.tab_novel_thumbnail, "소설 썸네일")
 
         # ========== Hidden 처리된 탭들 (초기화는 하되 addTab은 하지 않음) ==========
         
@@ -321,6 +342,76 @@ class MainApp(QWidget):
         layout.addWidget(self.log_display)
 
         self.tab1.setLayout(layout)
+
+    def initTabWhiskImage(self):
+        layout = QVBoxLayout()
+
+        self.whisk_status_label = QLabel("1단계: 브라우저를 먼저 준비해 주세요.")
+        self.whisk_status_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #D4D4D4;")
+        layout.addWidget(self.whisk_status_label)
+
+        self.whisk_timer_label = QLabel("소요 시간: 00:00:00")
+        layout.addWidget(self.whisk_timer_label)
+
+        # 저장 경로 설정
+        path_layout = QHBoxLayout()
+        self.whisk_image_path_edit = QLineEdit(r"D:\youtube")
+        self.whisk_image_path_edit.setStyleSheet("background-color: #2D2D2D; color: #D4D4D4; height: 25px;")
+        btn_browse_image = QPushButton("찾아보기")
+        btn_browse_image.clicked.connect(lambda: self.browse_image_path_custom(self.whisk_image_path_edit))
+        path_layout.addWidget(QLabel("저장 폴더:"))
+        path_layout.addWidget(self.whisk_image_path_edit)
+        path_layout.addWidget(btn_browse_image)
+        layout.addLayout(path_layout)
+
+        # 버튼들
+        self.btn_whisk_prepare = QPushButton("🌐 1. Whisk 브라우저 및 탭 준비")
+        self.btn_whisk_prepare.setStyleSheet("height: 50px; font-weight: bold; background-color: #673AB7; color: white; border-radius: 8px;")
+        self.btn_whisk_prepare.clicked.connect(self.launch_whisk_browser)
+        layout.addWidget(self.btn_whisk_prepare)
+
+        # 텍스트 입력창 추가
+        layout.addWidget(QLabel(" Whisk 이미지 프롬프트 입력:"))
+        self.whisk_image_prompt_input = QTextEdit()
+        self.whisk_image_prompt_input.setPlaceholderText("프롬프트 내용을 입력하세요.\n1. {프롬프트1}\n2. {프롬프트2}")
+        self.whisk_image_prompt_input.setStyleSheet("background-color: #1E1E1E; color: #D4D4D4;")
+        layout.addWidget(self.whisk_image_prompt_input)
+
+        btn_h_layout = QHBoxLayout()
+        self.btn_whisk_start = QPushButton("🚀 2. Whisk 이미지 생성 시작")
+        self.btn_whisk_start.setEnabled(True)
+        self.btn_whisk_start.setStyleSheet("""
+            QPushButton { height: 50px; font-weight: bold; background-color: #28a745; color: white; border-radius: 8px; }
+            QPushButton:disabled { background-color: #6c757d; }
+        """)
+        self.btn_whisk_start.clicked.connect(self.start_whisk_automation)
+        
+        self.btn_whisk_stop = QPushButton("🛑 중지")
+        self.btn_whisk_stop.setEnabled(False)
+        self.btn_whisk_stop.setStyleSheet("""
+            QPushButton { height: 50px; font-weight: bold; background-color: #dc3545; color: white; border-radius: 8px; }
+            QPushButton:disabled { background-color: #6c757d; }
+        """)
+        self.btn_whisk_stop.clicked.connect(self.stop_whisk_automation)
+
+        btn_h_layout.addWidget(self.btn_whisk_start)
+        btn_h_layout.addWidget(self.btn_whisk_stop)
+        layout.addLayout(btn_h_layout)
+
+        # 압축 버튼 추가
+        self.btn_whisk_compress = QPushButton("🗜️ 3. 이미지 압축 (용량 줄이기)")
+        self.btn_whisk_compress.setStyleSheet("height: 50px; font-weight: bold; background-color: #FF9800; color: white; border-radius: 8px; margin-top: 5px;")
+        self.btn_whisk_compress.clicked.connect(lambda: self.compress_images(dir_path=self.whisk_image_path_edit.text().strip()))
+        layout.addWidget(self.btn_whisk_compress)
+
+        # 로그 디스플레이
+        self.whisk_log_display = QTextEdit()
+        self.whisk_log_display.setReadOnly(True)
+        self.whisk_log_display.setStyleSheet("background-color: #1E1E1E; color: #D4D4D4; font-family: 'Consolas', 'Malgun Gothic';")
+        self.whisk_log_display.setMaximumHeight(150)
+        layout.addWidget(self.whisk_log_display)
+
+        self.tab_whisk_image.setLayout(layout)
 
 
     # Removed initTabImageFX
@@ -1354,6 +1445,16 @@ class MainApp(QWidget):
                 if 'font' in line_data: # 수정: 'font_combo' -> 'font'
                     combos.append(line_data['font'])
         
+        # 인트로 탭 콤보박스 추가
+        if hasattr(self, 'combo_intro_font'):
+            combos.append(self.combo_intro_font)
+
+        # 소설 썸네일 탭 콤보박스 추가
+        if hasattr(self, 'novel_thumb_lines'):
+            for line_data in self.novel_thumb_lines:
+                if 'font' in line_data:
+                    combos.append(line_data['font'])
+        
         # 시스템 폰트 경로 보강 (한글 깨짐 방지용)
         sys_fonts = {
             "Malgun Gothic": r"C:\Windows\Fonts\malgun.ttf",
@@ -1418,6 +1519,20 @@ class MainApp(QWidget):
                 idx = cb.findText(selected_font)
                 if idx >= 0:
                     cb.setCurrentIndex(idx)
+                    
+        # 인트로 탭 폰트 동기화
+        if hasattr(self, 'combo_intro_font'):
+            idx = self.combo_intro_font.findText(selected_font)
+            if idx >= 0:
+                self.combo_intro_font.setCurrentIndex(idx)
+
+        # 소설 썸네일 탭 폰트 동기화
+        if hasattr(self, 'novel_thumb_lines'):
+            for line_data in self.novel_thumb_lines:
+                if 'font' in line_data:
+                    idx = line_data['font'].findText(selected_font)
+                    if idx >= 0:
+                        line_data['font'].setCurrentIndex(idx)
                         
         else:
             # 매칭되는 게 없을 때의 폴백
@@ -1772,6 +1887,82 @@ class MainApp(QWidget):
             self.log_display.append(f"❌ 브라우저 실패: {error}")
             self.status_label.setText("오류 발생 (로그 확인)")
 
+    def launch_whisk_browser(self):
+        self.btn_whisk_prepare.setEnabled(False)
+        self.whisk_status_label.setText("1단계: Whisk 브라우저 실행 중...")
+        
+        self.browser_worker = BrowserLauncherWorker('whisk')
+        self.browser_worker.log_signal.connect(self.whisk_log_display.append)
+        self.browser_worker.finished.connect(self.on_whisk_browser_launch_finished)
+        self.browser_worker.start()
+
+    def on_whisk_browser_launch_finished(self, result):
+        driver, error = result
+        self.btn_whisk_prepare.setEnabled(True)
+        
+        if driver:
+            self.driver = driver
+            window_count = len(self.driver.window_handles)
+            self.whisk_log_display.append(f"✅ Whisk 브라우저 연결 성공. 현재 탭 수: {window_count}")
+            self.whisk_status_label.setText("2단계: 프롬프트 입력 후 시작 버튼을 누르세요.")
+        else:
+            self.whisk_log_display.append(f"❌ Whisk 브라우저 실패: {error}")
+            self.whisk_status_label.setText("오류 발생 (로그 확인)")
+
+    def start_whisk_automation(self):
+        if not self.driver:
+            self.whisk_log_display.append("❌ 브라우저가 준비되지 않았습니다.")
+            return
+        
+        text = self.whisk_image_prompt_input.toPlainText().strip()
+        if not text:
+            self.whisk_log_display.append("❌ 입력된 프롬프트가 없습니다.")
+            return
+
+        self.loaded_items = re.findall(r'(\d+)\s*\.\s*\{(.*?)\}', text, re.DOTALL)
+        if not self.loaded_items:
+             self.whisk_log_display.append("❌ 프롬프트 형식이 올바르지 않습니다 (예: 1. {프롬프트})")
+             return
+
+        self.btn_whisk_start.setEnabled(False)
+        self.btn_whisk_stop.setEnabled(True)
+        self.start_time_gen = time.time()
+        if not self.ui_timer.isActive():
+            self.ui_timer.start(1000) 
+        
+        self.current_file_path = "whisk_input_" + time.strftime("%H%M%S")
+        image_target = self.whisk_image_path_edit.text().strip()
+        
+        self.whisk_worker = WhiskMultiTabWorker(self.current_file_path, self.loaded_items, self.driver, custom_target_dir=image_target)
+        self.whisk_worker.progress.connect(self.whisk_status_label.setText)
+        self.whisk_worker.log_signal.connect(lambda m: self.whisk_log_display.append(m))
+        self.whisk_worker.finished.connect(self.on_whisk_success)
+        self.whisk_worker.error.connect(self.on_whisk_error)
+        self.whisk_worker.start()
+
+    def stop_whisk_automation(self):
+        if hasattr(self, 'whisk_worker'):
+            self.whisk_worker.stop()
+            self.whisk_log_display.append("🛑 중지 요청 중...")
+
+    def on_whisk_success(self, msg, elapsed):
+        self.start_time_gen = 0
+        self.ui_timer.stop()
+        self.btn_whisk_start.setEnabled(True)
+        self.btn_whisk_stop.setEnabled(False)
+        self.whisk_log_display.append(f"🏁 {msg}")
+        
+        if hasattr(self, 'whisk_worker') and self.whisk_worker.target_dir:
+            self.whisk_log_display.append("🔄 생성 완료: 자동 압축(JPG 변환)을 시작합니다...")
+            self.compress_images(dir_path=self.whisk_worker.target_dir)
+
+    def on_whisk_error(self, err):
+        self.start_time_gen = 0
+        self.ui_timer.stop()
+        self.btn_whisk_start.setEnabled(True)
+        self.btn_whisk_stop.setEnabled(False)
+        self.whisk_log_display.append(f"❌ 오류: {err}")
+
 
     # Removed ImageFX and Gemini API methods
 
@@ -1792,6 +1983,9 @@ class MainApp(QWidget):
         
             if hasattr(self, 'fx_timer_label'):
                 self.fx_timer_label.setText(f"소요 시간: {h:02d}:{m:02d}:{s:02d}")
+            
+            if hasattr(self, 'whisk_timer_label'):
+                self.whisk_timer_label.setText(f"소요 시간: {h:02d}:{m:02d}:{s:02d}")
 
 
     def start_automation(self):
@@ -2640,6 +2834,32 @@ class MainApp(QWidget):
         
         tab_all.setLayout(l_all)
         sub_tabs.addTab(tab_all, "3. All-in-One")
+
+        # SubTab 4: Merge Audio/SRT
+        tab_merge = QWidget()
+        l_merge = QVBoxLayout()
+        
+        merge_in_group = QGroupBox("파일 폴더 선택 (1.mp3, 1.srt ... 들이 있는 폴더)")
+        merge_in_layout = QHBoxLayout()
+        self.at_merge_folder = QLineEdit()
+        self.at_merge_folder.setPlaceholderText("폴더를 선택하세요.")
+        btn_merge = QPushButton("폴더 찾기")
+        btn_merge.clicked.connect(lambda: self.browse_folder(self.at_merge_folder))
+        merge_in_layout.addWidget(self.at_merge_folder)
+        merge_in_layout.addWidget(btn_merge)
+        merge_in_group.setLayout(merge_in_layout)
+        
+        l_merge.addWidget(merge_in_group)
+        l_merge.addWidget(QLabel("ℹ️ 폴더 내의 1.mp3, 2.mp3 등 숫자 순서대로 오디오와 SRT를 하나로 합칩니다."))
+        
+        self.btn_at_merge = QPushButton("4. MP3 + SRT 합치기 실행")
+        self.btn_at_merge.setStyleSheet("background-color: #FF9800; color: white; padding: 10px; font-weight: bold;")
+        self.btn_at_merge.clicked.connect(self.start_audio_srt_merge)
+        l_merge.addWidget(self.btn_at_merge)
+        l_merge.addStretch()
+        
+        tab_merge.setLayout(l_merge)
+        sub_tabs.addTab(tab_merge, "4. Merge Audio/SRT")
         
         layout.addWidget(sub_tabs)
         
@@ -2709,24 +2929,46 @@ class MainApp(QWidget):
         self.btn_at_convert.setEnabled(False)
         self.btn_at_transcribe.setEnabled(False)
         self.btn_at_all.setEnabled(False)
+        self.btn_at_merge.setEnabled(False)
         
         self.at_worker = AudioTranscriberWorker(target_files, mode, model_name, merge_mp3)
         self.at_worker.log_signal.connect(self.at_log.append)
         self.at_worker.finished.connect(self.on_at_finished)
         self.at_worker.error.connect(self.on_at_error)
         self.at_worker.start()
+
+    def start_audio_srt_merge(self):
+        folder_path = self.at_merge_folder.text().strip()
+        if not folder_path or not os.path.isdir(folder_path):
+            QMessageBox.warning(self, "경고", "유효한 폴더 경로가 아닙니다.")
+            return
+
+        self.btn_at_convert.setEnabled(False)
+        self.btn_at_transcribe.setEnabled(False)
+        self.btn_at_all.setEnabled(False)
+        self.btn_at_merge.setEnabled(False)
+
+        self.at_log.append(f"🚀 MP3/SRT 합치기 작업 시작: {folder_path}")
+        
+        self.merge_worker = AudioSrtMergerWorker(folder_path)
+        self.merge_worker.log_signal.connect(self.at_log.append)
+        self.merge_worker.finished.connect(self.on_at_finished)
+        self.merge_worker.error.connect(self.on_at_error)
+        self.merge_worker.start()
         
     def on_at_finished(self, msg):
         self.at_log.append(f"🏁 {msg}")
         self.btn_at_convert.setEnabled(True)
         self.btn_at_transcribe.setEnabled(True)
         self.btn_at_all.setEnabled(True)
+        self.btn_at_merge.setEnabled(True)
         
     def on_at_error(self, err):
         self.at_log.append(f"❌ 오류: {err}")
         self.btn_at_convert.setEnabled(True)
         self.btn_at_transcribe.setEnabled(True)
         self.btn_at_all.setEnabled(True)
+        self.btn_at_merge.setEnabled(True)
 
     def copy_to_clipboard(self, widget):
         text = ""
@@ -4843,6 +5085,1055 @@ class MainApp(QWidget):
             except Exception as e:
                 QMessageBox.critical(self, "오류", f"저장 실패: {e}")
 
+    # ========== 소설 썸네일 (Novel Thumbnail) ==========
+
+    def initTabNovelThumbnail(self):
+        layout = QVBoxLayout()
+        
+        # 0. Background Image
+        bg_layout = QHBoxLayout()
+        self.novel_thumb_bg_path = QLineEdit()
+        self.novel_thumb_bg_path.setPlaceholderText("배경 이미지 경로")
+        btn_bg = QPushButton("배경 선택")
+        btn_bg.setStyleSheet("height: 20px; width: 90px;")
+        btn_bg.clicked.connect(lambda: self.browse_single_file(self.novel_thumb_bg_path, "Images (*.png *.jpg *.jpeg)"))
+        bg_layout.addWidget(QLabel("배경:"))
+        bg_layout.addWidget(self.novel_thumb_bg_path)
+        bg_layout.addWidget(btn_bg)
+        
+        self.chk_novel_thumb_gradient = QCheckBox("하단 그라데이션")
+        self.chk_novel_thumb_gradient.setChecked(True)
+        self.chk_novel_thumb_gradient.setStyleSheet("color: white; font-weight: bold;")
+        bg_layout.addWidget(self.chk_novel_thumb_gradient)
+        layout.addLayout(bg_layout)
+
+        # Lines Group
+        self.novel_thumb_lines = []
+        
+        # Default Settings per line (Size, Y-Pos, ColorHex)
+        defaults = [
+            (130, 15, "#FFFFFF"), # Line 1: White, Size 130, Y 15
+            (50, 69, "#FFFF00"),  # Line 2: Yellow, Size 50, Y 69
+            (120, 84, "#FF0000")  # Line 3: Red, Size 120, Y 84
+        ]
+        
+        for i in range(3):
+            group = QGroupBox(f"줄 {i+1}")
+            g_layout = QHBoxLayout()
+            
+            text_edit = QLineEdit()
+            text_edit.setPlaceholderText(f"내용 입력 {i+1}")
+            
+            font_combo = QComboBox()
+            font_combo.setMinimumWidth(150)
+            
+            # Copy items & Set Preferred Font
+            if hasattr(self, 'combo_font') and self.combo_font.count() > 0:
+                for j in range(self.combo_font.count()):
+                    font_combo.addItem(self.combo_font.itemText(j))
+                
+                # Try to find 'ChosunKm' or '조선굵은명조'
+                found_idx = -1
+                for j in range(font_combo.count()):
+                    txt = font_combo.itemText(j)
+                    if "ChosunKm" in txt or "조선굵은명조" in txt:
+                        found_idx = j; break
+                
+                if found_idx >= 0:
+                    font_combo.setCurrentIndex(found_idx)
+                else:
+                    font_combo.setCurrentIndex(self.combo_font.currentIndex())
+            
+            def_size, def_y, def_color = defaults[i]
+            
+            size_spin = QSpinBox()
+            size_spin.setRange(10, 500)
+            size_spin.setValue(def_size)
+            size_spin.setSuffix(" px")
+
+            color_btn = QPushButton("색상")
+            color_btn.current_color = def_color
+            bg_c = QColor(def_color)
+            text_c = 'black' if bg_c.lightness() > 128 else 'white'
+            color_btn.setStyleSheet(f"background-color: {def_color}; color: {text_c}; font-weight: bold; height: 20px; width: 90px;")
+            color_btn.clicked.connect(lambda checked, b=color_btn: self.pick_color_btn(b))
+            
+            y_spin = QSpinBox()
+            y_spin.setRange(0, 100)
+            y_spin.setValue(def_y)
+            y_spin.setSuffix(" %")
+
+            g_layout.addWidget(QLabel("텍스트:"))
+            g_layout.addWidget(text_edit, 3)
+            g_layout.addWidget(QLabel("폰트:"))
+            g_layout.addWidget(font_combo, 2)
+            g_layout.addWidget(QLabel("크기:"))
+            g_layout.addWidget(size_spin, 1)
+            g_layout.addWidget(color_btn, 1)
+            g_layout.addWidget(QLabel("Y위치:"))
+            g_layout.addWidget(y_spin, 1)
+            
+            group.setLayout(g_layout)
+            layout.addWidget(group)
+            
+            self.novel_thumb_lines.append({
+                'text': text_edit,
+                'font': font_combo,
+                'size': size_spin,
+                'color_btn': color_btn,
+                'y_pos': y_spin
+            })
+            
+        # Preview & Action
+        btn_layout = QHBoxLayout()
+        btn_gen = QPushButton("🔄 미리보기/생성")
+        btn_gen.clicked.connect(self.generate_novel_thumbnail)
+        btn_gen.setStyleSheet("height: 40px; background-color: #673AB7; color: white; font-weight: bold;")
+        
+        btn_save = QPushButton("💾 저장")
+        btn_save.clicked.connect(self.save_novel_thumbnail)
+        btn_save.setStyleSheet("height: 40px; background-color: #28a745; color: white; font-weight: bold;")
+        
+        btn_layout.addWidget(btn_gen)
+        btn_layout.addWidget(btn_save)
+        layout.addLayout(btn_layout)
+        
+        self.novel_thumb_preview_label = QLabel()
+        self.novel_thumb_preview_label.setAlignment(Qt.AlignCenter)
+        self.novel_thumb_preview_label.setStyleSheet("border: 2px dashed #555; background-color: #222;")
+        self.novel_thumb_preview_label.setMinimumHeight(400)
+        self.novel_thumb_preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        layout.addWidget(self.novel_thumb_preview_label)
+        
+        self.current_novel_thumb_image = None
+        self.tab_novel_thumbnail.setLayout(layout)
+
+    def generate_novel_thumbnail(self):
+        bg_path = self.novel_thumb_bg_path.text().strip()
+        width, height = 1280, 720
+        
+        try:
+            if bg_path and os.path.exists(bg_path):
+                base_img = Image.open(bg_path).convert("RGBA")
+                base_img = base_img.resize((width, height), Image.LANCZOS)
+            else:
+                base_img = Image.new("RGBA", (width, height), (0, 0, 0, 255))
+            
+            if self.chk_novel_thumb_gradient.isChecked():
+                grad_height = int(height * 0.7)
+                alpha_mask = Image.new('L', (1, grad_height), 0)
+                for y in range(grad_height):
+                    alpha = int(255 * (y / grad_height))
+                    alpha_mask.putpixel((0, y), alpha)
+                alpha_mask = alpha_mask.resize((width, grad_height))
+                black_layer = Image.new("RGBA", (width, grad_height), "black")
+                black_layer.putalpha(alpha_mask)
+                overlay = Image.new("RGBA", (width, height), (0,0,0,0))
+                overlay.paste(black_layer, (0, height - grad_height))
+                base_img = Image.alpha_composite(base_img, overlay)
+
+            draw = ImageDraw.Draw(base_img)
+            
+            # Left Margin
+            x_margin = 35
+            
+            for item in self.novel_thumb_lines:
+                text = item['text'].text().strip()
+                if not text: continue
+                
+                font_name = item['font'].currentText()
+                font_size = item['size'].value()
+                color_hex = item['color_btn'].current_color
+                y_percent = item['y_pos'].value()
+                
+                font = None
+                if font_name in self.font_path_map:
+                    try:
+                        font = ImageFont.truetype(self.font_path_map[font_name], font_size)
+                    except: pass
+                
+                if font is None:
+                    try: font = ImageFont.truetype(r"C:\Windows\Fonts\malgunbd.ttf", font_size)
+                    except:
+                        try: font = ImageFont.truetype("arial.ttf", font_size)
+                        except: font = ImageFont.load_default()
+                
+                try:
+                    left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
+                    text_w = right - left
+                    text_h = bottom - top
+                except:
+                    text_w, text_h = draw.textsize(text, font=font)
+                
+                # Novel Style: Left Aligned
+                x_pos = x_margin
+                y_pos = (height * (y_percent / 100.0)) - (text_h / 2)
+                
+                stroke_width = max(2, int(font_size / 15))
+                stroke_color = "black" if color_hex.lower() != "#000000" else "white"
+                
+                draw.text((x_pos, y_pos), text, font=font, fill=color_hex, stroke_width=stroke_width, stroke_fill=stroke_color)
+                
+            self.current_novel_thumb_image = base_img
+            
+            data = base_img.tobytes("raw", "RGBA")
+            qim = QImage(data, width, height, QImage.Format_RGBA8888)
+            pixmap = QPixmap.fromImage(qim)
+            scaled_pixmap = pixmap.scaled(self.novel_thumb_preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.novel_thumb_preview_label.setPixmap(scaled_pixmap)
+            
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"소설 썸네일 생성 중 오류: {e}")
+            traceback.print_exc()
+
+    def save_novel_thumbnail(self):
+        if self.current_novel_thumb_image is None:
+            QMessageBox.warning(self, "경고", "먼저 썸네일을 생성해주세요.")
+            return
+            
+        path, _ = QFileDialog.getSaveFileName(self, "소설 썸네일 저장", "", "PNG Files (*.png);;JPG Files (*.jpg)")
+        if path:
+            try:
+                self.current_novel_thumb_image.save(path)
+                QMessageBox.information(self, "완료", f"저장되었습니다:\n{path}")
+            except Exception as e:
+                QMessageBox.critical(self, "오류", f"저장 실패: {e}")
+
+    # ========== 소설대본 (Novel Script) ==========
+
+    def initTabNovelScript(self):
+        self.current_novel_page = 1
+        self.novel_items_per_page = 20
+        
+        self.novel_tab_layout = QVBoxLayout()
+        self.novel_stack = QStackedWidget()
+        
+        # --- Page 1: List ---
+        self.novel_list_page = QWidget()
+        list_layout = QVBoxLayout()
+        
+        # Header Controls
+        search_layout = QHBoxLayout()
+        self.edit_novel_search = QLineEdit()
+        self.edit_novel_search.setPlaceholderText("제목 또는 소제목으로 검색 (Title or Arc Title)")
+        self.edit_novel_search.returnPressed.connect(self.load_novel_list)
+        
+        btn_search = QPushButton("검색")
+        btn_search.setFixedWidth(80)
+        btn_search.clicked.connect(self.load_novel_list)
+        
+        btn_refresh = QPushButton("새로고침")
+        btn_refresh.setFixedWidth(80)
+        btn_refresh.clicked.connect(self.load_novel_list)
+        
+        btn_new = QPushButton("신규 등록")
+        btn_new.setFixedWidth(120)
+        btn_new.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
+        btn_new.clicked.connect(lambda: self.switch_to_novel_form(None, None))
+        
+        search_layout.addWidget(self.edit_novel_search)
+        search_layout.addWidget(btn_search)
+        search_layout.addWidget(btn_refresh)
+        search_layout.addWidget(btn_new)
+        list_layout.addLayout(search_layout)
+        
+        # Table
+        self.novel_table = QTableWidget()
+        self.novel_table.setColumnCount(9)
+        self.novel_table.setHorizontalHeaderLabels([
+            "Novel ID", "Arc ID", "No", "Title", "Subtitle", "Genre", "Target", "Arc Title", "Created"
+        ])
+        self.novel_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.novel_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.novel_table.cellDoubleClicked.connect(self.on_novel_cell_double_click)
+        
+        header = self.novel_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.Interactive) # Title
+        header.setSectionResizeMode(6, QHeaderView.Stretch) # Arc Title stretch
+        
+        self.novel_table.setStyleSheet("""
+            QTableWidget { background-color: #2b2b2b; color: #d4d4d4; gridline-color: #444; }
+            QHeaderView::section { background-color: #333333; color: #ffffff; padding: 4px; border: 1px solid #444; }
+        """)
+        list_layout.addWidget(self.novel_table)
+        
+        # Pagination
+        pagination_layout = QHBoxLayout()
+        self.btn_novel_prev = QPushButton("◀ 이전")
+        self.btn_novel_prev.clicked.connect(lambda: self.change_novel_page(-1))
+        
+        self.lbl_novel_page_info = QLabel("1 / 1")
+        self.lbl_novel_page_info.setAlignment(Qt.AlignCenter)
+        self.lbl_novel_page_info.setMinimumWidth(100)
+        self.lbl_novel_page_info.setStyleSheet("color: white; font-weight: bold;")
+        
+        self.btn_novel_next = QPushButton("다음 ▶")
+        self.btn_novel_next.clicked.connect(lambda: self.change_novel_page(1))
+        
+        pagination_layout.addStretch()
+        pagination_layout.addWidget(self.btn_novel_prev)
+        pagination_layout.addWidget(self.lbl_novel_page_info)
+        pagination_layout.addWidget(self.btn_novel_next)
+        pagination_layout.addStretch()
+        list_layout.addLayout(pagination_layout)
+        
+        self.novel_list_page.setLayout(list_layout)
+        self.novel_stack.addWidget(self.novel_list_page)
+        
+        # --- Page 2: Form ---
+        self.novel_form_page = QWidget()
+        form_wrapper = QVBoxLayout()
+        
+        f_group = QGroupBox("소설 회차 정보 입력/수정")
+        grid = QGridLayout()
+        grid.setSpacing(5)
+        grid.setContentsMargins(10, 5, 10, 5)
+        self.combo_arc_novel = QComboBox()
+        self.combo_arc_novel.currentIndexChanged.connect(self.on_novel_selection_changed)
+        self.edit_arc_no = QLineEdit()
+        self.edit_arc_title = QLineEdit()
+        
+        self.txt_arc_content = QTextEdit()
+        self.txt_arc_content.setMinimumHeight(130)
+        self.txt_arc_content.setMaximumHeight(200)
+        self.txt_arc_content.setPlaceholderText("본문 내용을 입력하세요.")
+        
+        self.txt_arc_srt = QTextEdit()
+        self.txt_arc_srt.setMinimumHeight(130)
+        self.txt_arc_srt.setMaximumHeight(200)
+        self.txt_arc_srt.setPlaceholderText("SRT 자막 내용을 입력하세요.")
+        
+        self.txt_arc_next = QTextEdit()
+        self.txt_arc_next.setMaximumHeight(60)
+        self.txt_arc_prompt = QTextEdit()
+        self.txt_arc_prompt.setMinimumHeight(100)
+        
+        self.lbl_novel_id_val = QLabel("-")
+        self.lbl_arc_id_val = QLabel("-")
+        
+        grid.addWidget(QLabel("Novel ID:"), 0, 0)
+        grid.addWidget(self.lbl_novel_id_val, 0, 1)
+        grid.addWidget(QLabel("Arc ID:"), 0, 2)
+        grid.addWidget(self.lbl_arc_id_val, 0, 3)
+        
+        grid.addWidget(QLabel("소설 선택:"), 1, 0)
+        grid.addWidget(self.combo_arc_novel, 1, 1, 1, 3)
+        
+        grid.addWidget(QLabel("회차 번호:"), 2, 0)
+        grid.addWidget(self.edit_arc_no, 2, 1, 1, 3)
+        
+        grid.addWidget(QLabel("회차 제목:"), 3, 0)
+        grid.addWidget(self.edit_arc_title, 3, 1, 1, 3)
+        
+        grid.addWidget(QLabel("본문 내용:"), 4, 0)
+        grid.addWidget(self.txt_arc_content, 4, 1, 1, 3)
+
+        grid.addWidget(QLabel("SRT 자막:"), 5, 0)
+        grid.addWidget(self.txt_arc_srt, 5, 1, 1, 3)
+        
+        grid.addWidget(QLabel("이미지 프롬프트:"), 6, 0)
+        grid.addWidget(self.txt_arc_prompt, 6, 1, 1, 3)
+
+        grid.addWidget(QLabel("다음편 예고:"), 7, 0)
+        grid.addWidget(self.txt_arc_next, 7, 1, 1, 3)
+        
+        f_group.setLayout(grid)
+        form_wrapper.addWidget(f_group)
+
+        # --- File Upload Section (Audio & SRT) ---
+        upload_section = QVBoxLayout()
+        upload_section.setSpacing(10)
+        
+        # 1. Audio Upload
+        self.audio_group = QGroupBox("오디오 파일 업로드 (Audio Upload)")
+        self.audio_group.setStyleSheet("QGroupBox { font-weight: bold; color: #3498db; }")
+        a_layout = QHBoxLayout()
+        self.edit_novel_audio_path = QLineEdit()
+        self.edit_novel_audio_path.setPlaceholderText("파일 선택 (.mp3...)")
+        btn_a_sel = QPushButton("선택")
+        btn_a_sel.setFixedWidth(90)
+        btn_a_sel.setStyleSheet("height: 20px;")
+        btn_a_sel.clicked.connect(lambda: self.browse_single_file(self.edit_novel_audio_path, "Audio Files (*.mp3 *.wav)"))
+        
+        btn_a_up = QPushButton("업로드")
+        btn_a_up.setFixedWidth(90)
+        btn_a_up.setStyleSheet("background-color: #6f42c1; color: white; font-weight: bold; height: 20px;")
+        btn_a_up.clicked.connect(lambda: self.upload_novel_file(self.edit_novel_audio_path, self.edit_novel_audio_url))
+        
+        lbl_a_url = QLabel("URL")
+        lbl_a_url.setStyleSheet("color: #28a745; font-weight: bold;")
+        self.edit_novel_audio_url = QLineEdit()
+        self.edit_novel_audio_url.setPlaceholderText("URL")
+        
+        btn_a_down = QPushButton("다운")
+        btn_a_down.setFixedWidth(90)
+        btn_a_down.setStyleSheet("background-color: #17a2b8; color: white; font-weight: bold; height: 20px;")
+        btn_a_down.clicked.connect(lambda: self.download_novel_file(self.edit_novel_audio_url, "audio"))
+        
+        btn_a_del = QPushButton("삭제")
+        btn_a_del.setFixedWidth(90)
+        btn_a_del.setStyleSheet("background-color: #dc3545; color: white; font-weight: bold; height: 20px;")
+        btn_a_del.clicked.connect(lambda: self.delete_novel_file(self.edit_novel_audio_url))
+        
+        a_layout.addWidget(self.edit_novel_audio_path)
+        a_layout.addWidget(btn_a_sel)
+        a_layout.addWidget(btn_a_up)
+        a_layout.addWidget(lbl_a_url)
+        a_layout.addWidget(self.edit_novel_audio_url)
+        a_layout.addWidget(btn_a_down)
+        a_layout.addWidget(btn_a_del)
+        self.audio_group.setLayout(a_layout)
+        upload_section.addWidget(self.audio_group)
+
+        # 2. SRT Upload
+        self.srt_upload_group = QGroupBox("SRT 자막 파일 업로드 (SRT Upload)")
+        self.srt_upload_group.setStyleSheet("QGroupBox { font-weight: bold; color: #3498db; }")
+        s_layout = QHBoxLayout()
+        self.edit_novel_srt_path = QLineEdit()
+        self.edit_novel_srt_path.setPlaceholderText("파일 선택 (.srt)")
+        btn_s_sel = QPushButton("선택")
+        btn_s_sel.setFixedWidth(90)
+        btn_s_sel.setStyleSheet("height: 20px;")
+        btn_s_sel.clicked.connect(lambda: self.browse_single_file(self.edit_novel_srt_path, "SRT Files (*.srt)"))
+        
+        btn_s_up = QPushButton("업로드")
+        btn_s_up.setFixedWidth(90)
+        btn_s_up.setStyleSheet("background-color: #6f42c1; color: white; font-weight: bold; height: 20px;")
+        btn_s_up.clicked.connect(lambda: self.upload_novel_file(self.edit_novel_srt_path, self.edit_novel_srt_url))
+        
+        lbl_s_url = QLabel("URL")
+        lbl_s_url.setStyleSheet("color: #28a745; font-weight: bold;")
+        self.edit_novel_srt_url = QLineEdit()
+        self.edit_novel_srt_url.setPlaceholderText("URL")
+        
+        btn_s_down = QPushButton("다운")
+        btn_s_down.setFixedWidth(90)
+        btn_s_down.setStyleSheet("background-color: #17a2b8; color: white; font-weight: bold; height: 20px;")
+        btn_s_down.clicked.connect(lambda: self.download_novel_file(self.edit_novel_srt_url, "srt"))
+        
+        btn_s_del = QPushButton("삭제")
+        btn_s_del.setFixedWidth(90)
+        btn_s_del.setStyleSheet("background-color: #dc3545; color: white; font-weight: bold; height: 20px;")
+        btn_s_del.clicked.connect(lambda: self.delete_novel_file(self.edit_novel_srt_url))
+        
+        s_layout.addWidget(self.edit_novel_srt_path)
+        s_layout.addWidget(btn_s_sel)
+        s_layout.addWidget(btn_s_up)
+        s_layout.addWidget(lbl_s_url)
+        s_layout.addWidget(self.edit_novel_srt_url)
+        s_layout.addWidget(btn_s_down)
+        s_layout.addWidget(btn_s_del)
+        self.srt_upload_group.setLayout(s_layout)
+        upload_section.addWidget(self.srt_upload_group)
+        
+        form_wrapper.addLayout(upload_section)
+        
+        b_layout = QHBoxLayout()
+        btn_save = QPushButton("💾 저장")
+        btn_save.setStyleSheet("background-color: #28a745; color: white; height: 20px; font-weight: bold;")
+        btn_save.clicked.connect(self.save_novel_arc)
+        
+        self.btn_delete_novel_arc = QPushButton("🗑️ 삭제")
+        self.btn_delete_novel_arc.setStyleSheet("background-color: #dc3545; color: white; height: 20px; font-weight: bold;")
+        self.btn_delete_novel_arc.clicked.connect(self.delete_novel_arc)
+        
+        btn_list = QPushButton("📋 리스트")
+        btn_list.setStyleSheet("background-color: #6c757d; color: white; height: 20px; font-weight: bold;")
+        btn_list.clicked.connect(lambda: self.novel_stack.setCurrentIndex(0))
+        
+        b_layout.addStretch()
+        b_layout.addWidget(btn_save)
+        b_layout.addWidget(self.btn_delete_novel_arc)
+        b_layout.addWidget(btn_list)
+        form_wrapper.addLayout(b_layout)
+        form_wrapper.addStretch() # Pushes everything to the top
+        
+        self.novel_form_page.setLayout(form_wrapper)
+        self.novel_stack.addWidget(self.novel_form_page)
+        
+        self.novel_tab_layout.addWidget(self.novel_stack)
+        self.tab_novel_script.setLayout(self.novel_tab_layout)
+        
+        # Load initial data
+        self.load_novel_list()
+
+    def load_novel_list(self):
+        try:
+            if not getattr(self, 'tts_client', None):
+                 self.tts_client = ElevenLabsClient()
+            conn = self.tts_client.get_db_connection()
+            cursor = conn.cursor(dictionary=True)
+            
+            search_text = self.edit_novel_search.text().strip()
+            where_clause = ""
+            params = []
+            if search_text:
+                where_clause = "WHERE n.title LIKE %s OR a.arc_title LIKE %s"
+                params = [f"%{search_text}%", f"%{search_text}%"]
+            
+            # Count for pagination
+            count_query = f"SELECT COUNT(*) as cnt FROM novel_arcs a JOIN novel_works n ON a.novel_id = n.novel_id {where_clause}"
+            cursor.execute(count_query, tuple(params))
+            total_count = cursor.fetchone()['cnt']
+            
+            self.total_novel_pages = math.ceil(total_count / self.novel_items_per_page)
+            if self.total_novel_pages < 1: self.total_novel_pages = 1
+            if self.current_novel_page > self.total_novel_pages: self.current_novel_page = self.total_novel_pages
+            if self.current_novel_page < 1: self.current_novel_page = 1
+            
+            offset = (self.current_novel_page - 1) * self.novel_items_per_page
+            
+            query = f"""
+                SELECT a.*, n.title, n.subtitle, n.genre, n.target_audience
+                FROM novel_arcs a
+                JOIN novel_works n ON a.novel_id = n.novel_id
+                {where_clause}
+                ORDER BY a.created_dt DESC, a.novel_id DESC, a.arc_id DESC
+                LIMIT {self.novel_items_per_page} OFFSET {offset}
+            """
+            cursor.execute(query, tuple(params))
+            rows = cursor.fetchall()
+            
+            self.lbl_novel_page_info.setText(f"{self.current_novel_page} / {self.total_novel_pages}")
+            self.btn_novel_prev.setEnabled(self.current_novel_page > 1)
+            self.btn_novel_next.setEnabled(self.current_novel_page < self.total_novel_pages)
+            
+            self.novel_table.setRowCount(0)
+            for row in rows:
+                r_idx = self.novel_table.rowCount()
+                self.novel_table.insertRow(r_idx)
+                
+                # Column Order: Novel ID, Arc ID, No, Title, Subtitle, Genre, Target, Arc Title, Created
+                self.novel_table.setItem(r_idx, 0, QTableWidgetItem(str(row['novel_id'])))
+                self.novel_table.setItem(r_idx, 1, QTableWidgetItem(str(row['arc_id'])))
+                self.novel_table.setItem(r_idx, 2, QTableWidgetItem(str(row['arc_number'])))
+                self.novel_table.setItem(r_idx, 3, QTableWidgetItem(str(row['title'] or '')))
+                self.novel_table.setItem(r_idx, 4, QTableWidgetItem(str(row['subtitle'] or '')))
+                self.novel_table.setItem(r_idx, 5, QTableWidgetItem(str(row['genre'] or '')))
+                self.novel_table.setItem(r_idx, 6, QTableWidgetItem(str(row['target_audience'] or '')))
+                self.novel_table.setItem(r_idx, 7, QTableWidgetItem(str(row['arc_title'] or '')))
+                
+                dt = row['created_dt']
+                dt_str = dt.strftime("%Y-%m-%d %H:%M:%S") if dt else ""
+                item_dt = QTableWidgetItem(dt_str)
+                item_dt.setTextAlignment(Qt.AlignCenter)
+                self.novel_table.setItem(r_idx, 8, item_dt)
+                
+            cursor.close()
+            conn.close()
+        except Exception as e:
+            self.log_signal.emit(f"소설 목록 로드 오류: {e}")
+
+    def change_novel_page(self, delta):
+        self.current_novel_page += delta
+        self.load_novel_list()
+
+    def on_novel_cell_double_click(self, row, col):
+        novel_id = self.novel_table.item(row, 0).text()
+        arc_id = self.novel_table.item(row, 1).text()
+        self.switch_to_novel_form(novel_id, arc_id)
+
+    def on_novel_selection_changed(self):
+        curr_arc_id = self.lbl_arc_id_val.text()
+        if curr_arc_id == "신규":
+            novel_id = self.combo_arc_novel.currentData()
+            if novel_id:
+                self.fetch_next_arc_number(novel_id)
+
+    def fetch_next_arc_number(self, novel_id):
+        try:
+            conn = self.tts_client.get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT IFNULL(MAX(arc_number), 0) + 1 FROM novel_arcs WHERE novel_id = %s", (novel_id,))
+            next_no = cursor.fetchone()[0]
+            self.edit_arc_no.setText(str(next_no))
+            cursor.close()
+            conn.close()
+        except:
+            pass
+
+    def switch_to_novel_form(self, novel_id, arc_id):
+        # Load Novel Dropdown
+        self.load_novels()
+        
+        # Reset fields
+        self.edit_arc_no.clear()
+        self.edit_arc_title.clear()
+        self.txt_arc_content.clear()
+        self.txt_arc_srt.clear()
+        self.txt_arc_next.clear()
+        self.txt_arc_prompt.clear()
+        self.lbl_novel_id_val.setText("-")
+        self.lbl_arc_id_val.setText("-")
+        
+        # Reset upload fields
+        self.edit_novel_audio_path.clear()
+        self.edit_novel_audio_url.clear()
+        self.edit_novel_srt_path.clear()
+        self.edit_novel_srt_url.clear()
+        
+        if novel_id and arc_id:
+            # Edit Mode
+            self.lbl_novel_id_val.setText(str(novel_id))
+            self.lbl_arc_id_val.setText(str(arc_id))
+            self.combo_arc_novel.setEnabled(False)
+            self.btn_delete_novel_arc.show()
+            self.load_novel_arc_detail(novel_id, arc_id)
+        else:
+            # New Mode
+            self.lbl_novel_id_val.setText("신규")
+            self.lbl_arc_id_val.setText("신규")
+            self.combo_arc_novel.setEnabled(True)
+            self.btn_delete_novel_arc.hide()
+            # Set default arc number for first novel
+            self.on_novel_selection_changed()
+        
+        self.novel_stack.setCurrentIndex(1)
+
+    def load_novels(self):
+        try:
+            if not getattr(self, 'tts_client', None):
+                 self.tts_client = ElevenLabsClient()
+            conn = self.tts_client.get_db_connection()
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("SELECT novel_id, title FROM novel_works WHERE status <> '0' ORDER BY title ASC")
+            rows = cursor.fetchall()
+            self.combo_arc_novel.clear()
+            for row in rows:
+                self.combo_arc_novel.addItem(row['title'], row['novel_id'])
+            cursor.close()
+            conn.close()
+        except Exception as e:
+            print(f"Novels load error: {e}")
+
+    def load_novel_arc_detail(self, novel_id, arc_id):
+        try:
+            conn = self.tts_client.get_db_connection()
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("SELECT * FROM novel_arcs WHERE novel_id = %s AND arc_id = %s", (novel_id, arc_id))
+            row = cursor.fetchone()
+            cursor.close()
+            conn.close()
+            
+            if row:
+                idx = self.combo_arc_novel.findData(row['novel_id'])
+                if idx >= 0: self.combo_arc_novel.setCurrentIndex(idx)
+                
+                self.edit_arc_no.setText(str(row['arc_number']))
+                self.edit_arc_title.setText(row['arc_title'] or "")
+                self.txt_arc_content.setPlainText(row['content'] or "")
+                self.txt_arc_srt.setPlainText(row.get('srt_content') or "")
+                self.txt_arc_next.setPlainText(row['next_arc'] or "")
+                self.txt_arc_prompt.setPlainText(row['image_prompt'] or "")
+                self.edit_novel_audio_url.setText(row.get('audio_path') or "")
+                self.edit_novel_srt_url.setText(row.get('srt_path') or "")
+        except Exception as e:
+            QMessageBox.warning(self, "오류", f"상세 정보 조회 실패: {e}")
+
+    def delete_novel_arc(self):
+        novel_id = self.lbl_novel_id_val.text()
+        arc_id = self.lbl_arc_id_val.text()
+        if novel_id == "신규": return
+        
+        reply = QMessageBox.question(self, '삭제 확인', '정말 삭제하시겠습니까?', QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            try:
+                conn = self.tts_client.get_db_connection()
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM novel_arcs WHERE novel_id = %s AND arc_id = %s", (novel_id, arc_id))
+                conn.commit()
+                cursor.close()
+                conn.close()
+                QMessageBox.information(self, "완료", "삭제되었습니다.")
+                self.novel_stack.setCurrentIndex(0)
+                self.load_novel_list()
+            except Exception as e:
+                QMessageBox.critical(self, "오류", f"삭제 실패: {e}")
+
+    def save_novel_arc(self):
+        novel_id = self.combo_arc_novel.currentData()
+        arc_no = self.edit_arc_no.text().strip()
+        arc_title = self.edit_arc_title.text().strip()
+        content = self.txt_arc_content.toPlainText().strip()
+        srt_content = self.txt_arc_srt.toPlainText().strip()
+        next_arc = self.txt_arc_next.toPlainText().strip()
+        prompt = self.txt_arc_prompt.toPlainText().strip()
+        audio_path_val = self.edit_novel_audio_url.text().strip()
+        srt_path_val = self.edit_novel_srt_url.text().strip()
+        
+        if not novel_id or not arc_no or not arc_title:
+            QMessageBox.warning(self, "입력 오류", "소설 선택, 회차 번호, 제목은 필수입니다.")
+            return
+            
+        try:
+            conn = self.tts_client.get_db_connection()
+            cursor = conn.cursor()
+            
+            curr_novel_id_str = self.lbl_novel_id_val.text()
+            curr_arc_id_str = self.lbl_arc_id_val.text()
+            
+            # Debug Log
+            self.log_signal.emit(f"📝 DB 저장 시도: novel_id={novel_id}, arc_no={arc_no}, audio_path={audio_path_val}")
+            
+            if curr_arc_id_str == "신규":
+                # Get Next ARC_ID (Record PK) for this novel
+                cursor.execute("SELECT IFNULL(MAX(arc_id), 0) + 1 FROM novel_arcs WHERE novel_id = %s", (novel_id,))
+                new_arc_id = cursor.fetchone()[0]
+                
+                query = """
+                    INSERT INTO novel_arcs (novel_id, arc_id, arc_number, arc_title, content, srt_content, audio_path, srt_path, next_arc, image_prompt, status)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, '1')
+                """
+                cursor.execute(query, (novel_id, new_arc_id, arc_no, arc_title, content, srt_content, audio_path_val, srt_path_val, next_arc, prompt))
+            else:
+                query = """
+                    UPDATE novel_arcs 
+                    SET novel_id=%s, arc_number=%s, arc_title=%s, content=%s, srt_content=%s, audio_path=%s, srt_path=%s, next_arc=%s, image_prompt=%s, status='1'
+                    WHERE novel_id=%s AND arc_id=%s
+                """
+                # Use current hidden values to target correct record
+                cursor.execute(query, (novel_id, arc_no, arc_title, content, srt_content, audio_path_val, srt_path_val, next_arc, prompt, int(curr_novel_id_str), int(curr_arc_id_str)))
+            
+            conn.commit()
+            cursor.close()
+            conn.close()
+            
+            QMessageBox.information(self, "성공", "저장되었습니다.")
+            self.novel_stack.setCurrentIndex(0)
+            self.load_novel_list()
+        except Exception as e:
+            QMessageBox.critical(self, "저장 오류", f"DB 저장 중 오류 발생:\n{e}")
+
+    # --- 서버 파일 업로드 로직 ---
+    def upload_novel_file(self, edit_path, edit_url):
+        file_path = edit_path.text().strip()
+        if not file_path or not os.path.exists(file_path):
+            QMessageBox.warning(self, "입력 오류", "업로드할 파일을 먼저 선택해주세요.")
+            return
+            
+        url = "https://lo.devlab.pics/api/file/upload"
+        try:
+            with open(file_path, 'rb') as f:
+                files = {'file': f}
+                self.log_signal.emit(f"🚀 파일 업로드 중: {file_path}")
+                resp = requests.post(url, files=files, timeout=300)
+                
+                if resp.status_code == 200:
+                    data = resp.json()
+                    file_url = data.get('url')
+                    edit_url.setText(file_url)
+                    self.log_signal.emit(f"✅ 업로드 성공: {file_url}")
+                    
+                    # --- Proactive Immediate DB Update ---
+                    curr_novel_id = self.lbl_novel_id_val.text()
+                    curr_arc_id = self.lbl_arc_id_val.text()
+                    
+                    if curr_novel_id != "신규" and curr_arc_id != "신규":
+                        col_target = "audio_path" if edit_url == self.edit_novel_audio_url else "srt_path"
+                        try:
+                            conn = self.tts_client.get_db_connection()
+                            cursor = conn.cursor()
+                            up_query = f"UPDATE novel_arcs SET {col_target} = %s WHERE novel_id = %s AND arc_id = %s"
+                            cursor.execute(up_query, (file_url, int(curr_novel_id), int(curr_arc_id)))
+                            conn.commit()
+                            cursor.close()
+                            conn.close()
+                            self.log_signal.emit(f"💾 DB 즉시 업데이트 완료 ({col_target})")
+                        except Exception as up_e:
+                            self.log_signal.emit(f"⚠️ DB 즉시 업데이트 실패: {up_e}")
+
+                    QMessageBox.information(self, "성공", "파일이 성공적으로 업로드되었습니다.")
+                else:
+                    self.log_signal.emit(f"❌ 업로드 실패: {resp.status_code}")
+                    QMessageBox.critical(self, "오류", f"업로드 실패 ({resp.status_code}):\n{resp.text}")
+        except Exception as e:
+            self.log_signal.emit(f"❌ 업로드 도중 예외 발생: {e}")
+            QMessageBox.critical(self, "오류", f"통신 오류 발생:\n{e}")
+
+    def download_novel_file(self, edit_url, file_type="audio"):
+        url = edit_url.text().strip()
+        if not url:
+            QMessageBox.warning(self, "입력 오류", "다운로드할 URL이 없습니다.")
+            return
+            
+        # Suggested naming: NovelTitle_ArcNo.ext
+        novel_title = self.combo_arc_novel.currentText().strip()
+        arc_no = self.edit_arc_no.text().strip()
+        ext = "mp3" if file_type == "audio" else "srt"
+        # Remove invalid filename characters
+        safe_title = re.sub(r'[\/:*?"<>|]', '', novel_title)
+        suggested_name = f"{safe_title}_{arc_no}.{ext}"
+        
+        filter_str = "Audio Files (*.mp3 *.wav)" if file_type == "audio" else "SRT Files (*.srt)"
+        
+        save_path, _ = QFileDialog.getSaveFileName(self, "파일 직접 다운로드", suggested_name, filter_str)
+        if not save_path:
+            return
+            
+        try:
+            self.log_signal.emit(f"📥 파일 다운로드 시작: {url}")
+            resp = requests.get(url, timeout=60, stream=True)
+            if resp.status_code == 200:
+                with open(save_path, 'wb') as f:
+                    for chunk in resp.iter_content(chunk_size=8192):
+                        f.write(chunk)
+                self.log_signal.emit(f"✅ 다운로드 완료: {save_path}")
+                QMessageBox.information(self, "완료", f"파일이 성공적으로 다운로드되었습니다.\n{save_path}")
+            else:
+                self.log_signal.emit(f"❌ 다운로드 실패 ({resp.status_code})")
+                QMessageBox.critical(self, "오류", f"다운로드 실패 ({resp.status_code})")
+        except Exception as e:
+            self.log_signal.emit(f"❌ 다운로드 도중 예외: {e}")
+            QMessageBox.critical(self, "오류", f"다운로드 중 오류 발생:\n{e}")
+
+    def delete_novel_file(self, edit_url):
+        url_text = edit_url.text().strip()
+        if not url_text:
+            return
+            
+        reply = QMessageBox.question(self, '삭제 확인', '서버에서 이 파일을 정말 삭제하시겠습니까?\n(경로: ' + url_text + ')', 
+                                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            # Java: @DeleteMapping("/delete") @RequestParam("filePath")
+            # filePath는 서버의 로컬 경로여야 함. (/home/dist/html/file/...)
+            # URL 예시: https://image.devlab.pics/file/2026/02/uuid.mp3 
+            
+            # 클라이언트 측 추정: URL에서 경로 추출 
+            # (Java 코드 참고: basePath=/home/dist/html/file, baseUrl=https://image.devlab.pics/file)
+            target_file_path = ""
+            if "image.devlab.pics/file/" in url_text:
+                rel_path = url_text.split("image.devlab.pics/file/")[1]
+                target_file_path = f"/home/dist/html/file/{rel_path}"
+            else:
+                target_file_path = url_text
+                
+            delete_api_url = "https://lo.devlab.pics/api/file/delete"
+            try:
+                params = {"filePath": target_file_path}
+                self.log_signal.emit(f"🗑️ 서버 파일 삭제 요청: {target_file_path}")
+                resp = requests.delete(delete_api_url, params=params, timeout=30)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get('success'):
+                        QMessageBox.information(self, "완료", "서버 파일이 삭제되었습니다.")
+                        edit_url.clear()
+                    else:
+                        QMessageBox.warning(self, "실패", f"삭제 실패: {data.get('message')}")
+                else:
+                    self.log_signal.emit(f"❌ 삭제 실패: {resp.status_code}")
+                    QMessageBox.warning(self, "실패", f"삭제 실패 ({resp.status_code}):\n{resp.text}")
+            except Exception as e:
+                self.log_signal.emit(f"❌ 삭제 도중 예외 발생: {e}")
+                QMessageBox.critical(self, "오류", f"통신 오류:\n{e}")
+
+    # ========== 인트로 (Intro) 생성 ==========
+
+    def initTabIntro(self):
+        main_layout = QHBoxLayout()
+        
+        # --- Left: Form ---
+        left_widget = QWidget()
+        left_layout = QVBoxLayout()
+        left_widget.setLayout(left_layout)
+        left_widget.setFixedWidth(400)
+        
+        form_group = QGroupBox("인트로 이미지 생성")
+        form_layout = QFormLayout()
+        form_layout.setSpacing(10)
+        
+        self.edit_intro_text1 = QLineEdit()
+        self.edit_intro_text1.setPlaceholderText("[천찬혈로:피로 물든 강호의 길]")
+        # self.edit_intro_text1.setText("[천찬혈로:피로 물든 강호의 길]") # 초기 텍스트 제거
+        
+        self.edit_intro_text2 = QLineEdit()
+        self.edit_intro_text2.setPlaceholderText("제 1 화 - 혈야")
+        # self.edit_intro_text2.setText("제 1 화 - 혈야") # 초기 텍스트 제거
+        
+        self.combo_intro_font = QComboBox()
+        self.combo_intro_font.setMinimumWidth(200)
+        
+        self.spin_intro_font_size = QSpinBox()
+        self.spin_intro_font_size.setRange(20, 500)
+        self.spin_intro_font_size.setValue(55)
+        
+        # Color Buttons
+        self.btn_intro_text_color = QPushButton("#ffffff")
+        self.btn_intro_text_color.current_color = "#ffffff"
+        self.btn_intro_text_color.setStyleSheet("background-color: #ffffff; color: black; font-weight: bold; height: 30px;")
+        self.btn_intro_text_color.clicked.connect(lambda: self.pick_intro_color(self.btn_intro_text_color))
+        
+        self.btn_intro_bg_color = QPushButton("#000000")
+        self.btn_intro_bg_color.current_color = "#000000"
+        self.btn_intro_bg_color.setStyleSheet("background-color: #000000; color: white; font-weight: bold; height: 30px;")
+        self.btn_intro_bg_color.clicked.connect(lambda: self.pick_intro_color(self.btn_intro_bg_color))
+
+        self.lbl_intro_size = QLineEdit("1344 x 768 (WebToon)")
+        self.lbl_intro_size.setReadOnly(True)
+        self.lbl_intro_size.setStyleSheet("background-color: #2b2b2b; color: #888; border: none;")
+        
+        form_layout.addRow("텍스트 1줄:", self.edit_intro_text1)
+        form_layout.addRow("텍스트 2줄:", self.edit_intro_text2)
+        form_layout.addRow("폰트 선택:", self.combo_intro_font)
+        form_layout.addRow("폰트 크기:", self.spin_intro_font_size)
+        form_layout.addRow("텍스트 색상:", self.btn_intro_text_color)
+        form_layout.addRow("배경 색상:", self.btn_intro_bg_color)
+        form_layout.addRow("이미지 크기:", self.lbl_intro_size)
+        
+        form_group.setLayout(form_layout)
+        left_layout.addWidget(form_group)
+        
+        # Save Location
+        path_group = QGroupBox("저장 위치 설정")
+        path_layout = QHBoxLayout()
+        self.edit_intro_save_dir = QLineEdit(r"D:\youtube")
+        btn_intro_browse = QPushButton("폴더 선택")
+        btn_intro_browse.setFixedWidth(90)
+        btn_intro_browse.setStyleSheet("background-color: #0078d4; color: white; border-radius: 4px;")
+        btn_intro_browse.clicked.connect(lambda: self.browse_folder(self.edit_intro_save_dir))
+        path_layout.addWidget(self.edit_intro_save_dir)
+        path_layout.addWidget(btn_intro_browse)
+        path_group.setLayout(path_layout)
+        left_layout.addWidget(path_group)
+        
+        # Action Buttons
+        self.btn_intro_save = QPushButton("💾 1.jpg 파일 생성 (Save)")
+        self.btn_intro_save.setStyleSheet("""
+            QPushButton { height: 60px; font-weight: bold; background-color: #0d6efd; color: white; border-radius: 8px; font-size: 16px; }
+            QPushButton:hover { background-color: #0b5ed7; }
+        """)
+        self.btn_intro_save.clicked.connect(self.save_intro_image)
+        left_layout.addWidget(self.btn_intro_save)
+        
+        self.intro_log = QTextEdit()
+        self.intro_log.setReadOnly(True)
+        self.intro_log.setStyleSheet("background-color: #1e1e1e; color: #d4d4d4;")
+        self.intro_log.setMaximumHeight(150)
+        left_layout.addWidget(self.intro_log)
+        
+        left_layout.addStretch()
+        
+        # --- Right: Preview ---
+        right_panel = QVBoxLayout()
+        preview_label_title = QLabel("미리보기 (Preview)")
+        preview_label_title.setAlignment(Qt.AlignCenter)
+        preview_label_title.setStyleSheet("font-weight: bold; margin-bottom: 5px;")
+        right_panel.addWidget(preview_label_title)
+        
+        self.lbl_intro_preview = QLabel()
+        self.lbl_intro_preview.setAlignment(Qt.AlignCenter)
+        self.lbl_intro_preview.setStyleSheet("border: 1px solid #444; background-color: #1a1a1a;")
+        self.lbl_intro_preview.setMinimumSize(400, 300)
+        self.lbl_intro_preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        right_panel.addWidget(self.lbl_intro_preview, 1)
+        
+        main_layout.addWidget(left_widget)
+        main_layout.addLayout(right_panel, 1)
+        
+        self.tab_intro.setLayout(main_layout)
+        
+        # Connections
+        self.edit_intro_text1.textChanged.connect(self.update_intro_preview)
+        self.edit_intro_text2.textChanged.connect(self.update_intro_preview)
+        self.combo_intro_font.currentIndexChanged.connect(self.update_intro_preview)
+        self.spin_intro_font_size.valueChanged.connect(self.update_intro_preview)
+        
+        # Store current pixmap for saving
+        self.current_intro_pixmap = None
+        
+        # Initial preview draw
+        QTimer.singleShot(500, self.update_intro_preview)
+
+    def pick_intro_color(self, btn):
+        color = QColorDialog.getColor(QColor(btn.current_color))
+        if color.isValid():
+            hex_color = color.name()
+            btn.current_color = hex_color
+            btn.setText(hex_color)
+            # Contrast text color
+            text_c = 'black' if color.lightness() > 128 else 'white'
+            btn.setStyleSheet(f"background-color: {hex_color}; color: {text_c}; font-weight: bold; height: 30px;")
+            self.update_intro_preview()
+
+    def update_intro_preview(self):
+        try:
+            # High-res Canvas
+            W, H = 1344, 768
+            pixmap = QPixmap(W, H)
+            
+            bg_color = QColor(self.btn_intro_bg_color.current_color)
+            pixmap.fill(bg_color)
+            
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setRenderHint(QPainter.TextAntialiasing)
+            
+            text1 = self.edit_intro_text1.text().strip()
+            text2 = self.edit_intro_text2.text().strip()
+            font_family = self.combo_intro_font.currentText()
+            font_size = self.spin_intro_font_size.value()
+            text_color = QColor(self.btn_intro_text_color.current_color)
+            
+            font = QFont(font_family, font_size)
+            painter.setFont(font)
+            painter.setPen(text_color)
+            
+            fm = painter.fontMetrics()
+            
+            # Line 1 height
+            h1 = fm.height()
+            # Line 2 height
+            h2 = fm.height()
+            
+            gap = 30
+            total_h = h1 + h2 + gap
+            start_y = (H - total_h) // 2
+            
+            # Draw Line 1
+            painter.drawText(QRect(0, start_y, W, h1), Qt.AlignCenter, text1)
+            # Draw Line 2
+            painter.drawText(QRect(0, start_y + h1 + gap, W, h2), Qt.AlignCenter, text2)
+            
+            painter.end()
+            
+            self.current_intro_pixmap = pixmap
+            
+            # Scale to fit label
+            label_size = self.lbl_intro_preview.size()
+            if label_size.width() > 10 and label_size.height() > 10:
+                scaled = pixmap.scaled(label_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                self.lbl_intro_preview.setPixmap(scaled)
+                
+        except Exception as e:
+            print(f"Intro Preview Error: {e}")
+
+    def save_intro_image(self):
+        if self.current_intro_pixmap is None:
+            self.update_intro_preview()
+            
+        save_dir = self.edit_intro_save_dir.text().strip()
+        if not save_dir:
+            QMessageBox.warning(self, "경고", "저장 폴더를 지정해주세요.")
+            return
+            
+        if not os.path.exists(save_dir):
+            try: os.makedirs(save_dir)
+            except: pass
+            
+        save_path = os.path.join(save_dir, "1.jpg")
+        
+        try:
+            success = self.current_intro_pixmap.save(save_path, "JPG", 95)
+            if success:
+                self.intro_log.append(f"✅ 인트로 저장 완료: {save_path}")
+                QMessageBox.information(self, "성공", f"이미지 생성이 완료되었습니다.\n{save_path}")
+                # os.startfile(save_dir) # 탐색기 자동 열기 제거
+            else:
+                QMessageBox.critical(self, "오류", "파일 저장 중에 실패했습니다.")
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"저장 중 예외 발생:\n{e}")
+
+
 
 
 class BatchVideoEffectWorker(VideoMergerWorker):
@@ -5715,6 +7006,7 @@ class AudioToVideoWorker(QThread):
         r = subprocess.run([exe, "-i", p], stderr=subprocess.PIPE, stdout=subprocess.PIPE, creationflags=0x08000000)
         m = re.search(r"Duration: (\d+):(\d+):(\d+\.\d+)", r.stderr.decode('utf-8', errors='ignore'))
         return float(m.group(1))*3600 + float(m.group(2))*60 + float(m.group(3)) if m else 0.0
+
 
 
 

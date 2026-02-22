@@ -1114,3 +1114,87 @@ class GrokMultiTabWorker(QThread):
             return False
         except:
             return False
+class WhiskMultiTabWorker(GenSparkMultiTabWorker):
+    def run(self):
+        start_timestamp = time.time()
+        try:
+            if len(self.driver.window_handles) < 2:
+                self.error.emit("❌ 오류: 브라우저 탭이 2개 미만입니다. Whisk 탭을 2개 이상 준비해주세요.")
+                return
+
+            tabs = self.driver.window_handles[:2]
+            wait = WebDriverWait(self.driver, 20)
+
+            total = len(self.items)
+            tab_status = {tabs[0]: None, tabs[1]: None}
+            tab_old_srcs = {tabs[0]: [], tabs[1]: []}
+            
+            processed_count = 0
+            item_idx = 0
+            failed_items = []
+
+            self.is_running = True
+            while processed_count < total and self.is_running:
+                for tab in tabs:
+                    if not self.is_running: break
+                    self.driver.switch_to.window(tab)
+                    
+                    if tab_status[tab] is None and item_idx < total:
+                        current_item = self.items[item_idx]
+                        num, prompt = current_item
+                        self.log_signal.emit(f"▶ [탭 {tabs.index(tab)+1}] {num}번 생성 시작 (Whisk)...")
+                        
+                        tab_old_srcs[tab] = self.driver.execute_script("return Array.from(document.querySelectorAll('img')).map(img => img.src);")
+                        
+                        # Whisk는 구글 랩스 UI이므로 입력창을 신중히 찾음
+                        try:
+                            # 1. textarea 시도
+                            input_box = wait.until(EC.element_to_be_clickable((By.TAG_NAME, "textarea")))
+                        except:
+                            # 2. contenteditable 시도
+                            input_box = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, '[contenteditable="true"]')))
+                            
+                        input_box.click()
+                        time.sleep(0.5)
+                        
+                        # 내용 지우기 및 입력
+                        from selenium.webdriver.common.action_chains import ActionChains
+                        actions = ActionChains(self.driver)
+                        actions.key_down(Keys.CONTROL).send_keys('a').key_up(Keys.CONTROL).send_keys(Keys.BACKSPACE).perform()
+                        
+                        input_box.send_keys(prompt.strip())
+                        time.sleep(1)
+                        
+                        # 엔터 입력 (혹은 전송 버튼 클릭)
+                        input_box.send_keys(Keys.ENTER)
+                        
+                        tab_status[tab] = {"item": current_item, "start_time": time.time()}
+                        item_idx += 1
+                        self.progress.emit(f"진행: {processed_count}/{total}")
+
+                    elif tab_status[tab] is not None:
+                        target_num = tab_status[tab]["item"][0]
+                        img_data = self.check_image_once(self.driver, tab_old_srcs[tab])
+                        
+                        if img_data:
+                            save_path = os.path.join(self.target_dir, f"{target_num}.png")
+                            with open(save_path, "wb") as f:
+                                f.write(base64.b64decode(img_data))
+                            self.log_signal.emit(f"  ✅ [탭 {tabs.index(tab)+1}] {target_num}번 저장 완료")
+                            tab_status[tab] = None
+                            processed_count += 1
+                        
+                        elif time.time() - tab_status[tab]["start_time"] > 180:
+                            self.log_signal.emit(f"  ❌ [탭 {tabs.index(tab)+1}] {target_num}번 타임아웃")
+                            failed_items.append(tab_status[tab]["item"])
+                            tab_status[tab] = None
+                            processed_count += 1
+                
+                time.sleep(1)
+
+            elapsed_time = time.time() - start_timestamp
+            result_msg = f"완료 (성공 {total - len(failed_items)} / 실패 {len(failed_items)})" if self.is_running else "중지됨"
+            self.finished.emit(result_msg, elapsed_time)
+
+        except Exception as e:
+            self.error.emit(str(e))
