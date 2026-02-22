@@ -215,17 +215,22 @@ class MainApp(QWidget):
         self.initTabVideoList()
         self.tabs.addTab(self.tab_video_list, "대본리스트")
 
-        # 10. 프롬프트
+        # 10. 대본 자르기
+        self.tab_script_split = QWidget()
+        self.initTabScriptSplit()
+        self.tabs.addTab(self.tab_script_split, "대본 자르기")
+
+        # 11. 프롬프트
         self.tab_prompt = QWidget()
         self.initTabPrompt()
         self.tabs.addTab(self.tab_prompt, "프롬프트")
 
-        # 11. Audio Transcribe
+        # 12. Audio Transcribe
         self.tab_transcribe = QWidget()
         self.initTabAudioTranscribe()
         self.tabs.addTab(self.tab_transcribe, "Audio Transcribe")
 
-        # 12. YouTube 분석
+        # 13. YouTube 분석
         self.tab7 = QWidget()
         self.initTab7()
         self.tabs.addTab(self.tab7, "YouTube 분석")
@@ -2735,6 +2740,120 @@ class MainApp(QWidget):
             clipboard.setText(text)
             self.log_signal.emit("📋 클립보드에 복사되었습니다.")
 
+    def initTabScriptSplit(self):
+        layout = QVBoxLayout()
+        
+        # 설명 레이블
+        layout.addWidget(QLabel("📖 대본을 일정 글자 수 단위로 자릅니다. (마침표 기준)"))
+        
+        # 설정 레이아웃
+        config_layout = QHBoxLayout()
+        self.spin_split_limit = QSpinBox()
+        self.spin_split_limit.setRange(100, 5000)
+        self.spin_split_limit.setValue(800)
+        self.spin_split_limit.setSuffix(" 자")
+        config_layout.addWidget(QLabel("기준 글자 수:"))
+        config_layout.addWidget(self.spin_split_limit)
+        config_layout.addStretch()
+        layout.addLayout(config_layout)
+        
+        # 입력 영역
+        layout.addWidget(QLabel("입력 대본:"))
+        self.txt_split_input = QTextEdit()
+        self.txt_split_input.setPlaceholderText("여기에 긴 대본을 붙여넣으세요...")
+        layout.addWidget(self.txt_split_input)
+        
+        # 실행 버튼
+        self.btn_run_split = QPushButton("✂️ 대본 자르기 실행")
+        self.btn_run_split.setStyleSheet("height: 50px; font-weight: bold; background-color: #673AB7; color: white; border-radius: 8px;")
+        self.btn_run_split.clicked.connect(self.split_script)
+        layout.addWidget(self.btn_run_split)
+        
+        # 출력 영역
+        layout.addWidget(QLabel("분할 결과:"))
+        self.txt_split_output = QTextEdit()
+        self.txt_split_output.setReadOnly(True)
+        layout.addWidget(self.txt_split_output)
+
+        # 복사 버튼
+        self.btn_copy_split = QPushButton("📋 결과 전체 복사")
+        self.btn_copy_split.clicked.connect(lambda: self.copy_to_clipboard(self.txt_split_output))
+        layout.addWidget(self.btn_copy_split)
+        
+        self.tab_script_split.setLayout(layout)
+
+    def split_script(self):
+        text = self.txt_split_input.toPlainText().strip()
+        if not text:
+            QMessageBox.warning(self, "알림", "대본을 입력해주세요.")
+            return
+            
+        limit = self.spin_split_limit.value()
+        max_limit = limit + 50 # 800~850자(공백 제외) 허용
+        
+        def get_idx_by_non_space_count(s, target):
+            count = 0
+            for i, char in enumerate(s):
+                if not char.isspace():
+                    count += 1
+                if count >= target:
+                    return i
+            return len(s) - 1
+
+        def is_safe_dot(s, idx):
+            # 숫자 사이의 마침표(소수점)인지 확인
+            if 0 < idx < len(s) - 1:
+                if s[idx-1].isdigit() and s[idx+1].isdigit():
+                    return False
+            return True
+
+        segments = []
+        remaining = text
+        
+        while remaining:
+            # 남은 텍스트의 공백 제외 글자 수 확인
+            non_space_len = len([c for c in remaining if not c.isspace()])
+            
+            if non_space_len <= max_limit:
+                segments.append(remaining)
+                break
+            
+            # 기준 인덱스 찾기
+            limit_idx = get_idx_by_non_space_count(remaining, limit)
+            max_limit_idx = get_idx_by_non_space_count(remaining, max_limit)
+            
+            # 1. limit_idx ~ max_limit_idx 사이에서 '안전한' 마침표 찾기
+            found_idx = -1
+            for i in range(limit_idx, max_limit_idx + 1):
+                if i < len(remaining) and remaining[i] == "." and is_safe_dot(remaining, i):
+                    found_idx = i
+                    break
+            
+            if found_idx == -1:
+                # 2. 범위 내에 없으면 limit_idx 이전에서 가장 가까운 '안전한' 마침표 찾기
+                for i in range(limit_idx, -1, -1):
+                    if remaining[i] == "." and is_safe_dot(remaining, i):
+                        found_idx = i
+                        break
+                
+                if found_idx == -1:
+                    # 3. 마침표가 전혀 없으면 그냥 limit_idx에서 자름
+                    found_idx = limit_idx
+            
+            # 자르기 (마침표 포함)
+            cut_point = found_idx + 1
+            segment = remaining[:cut_point].strip()
+            segments.append(segment)
+            remaining = remaining[cut_point:].strip()
+            
+        # 결과 표시
+        result_text = ""
+        for i, seg in enumerate(segments, 1):
+            result_text += f"{i}. {seg}\n\n"
+            
+        self.txt_split_output.setPlainText(result_text.strip())
+        self.log_signal.emit(f"✅ 대본이 {len(segments)}개로 분활되었습니다. (공백 미포함 기준)")
+
     def initTabVideoList(self):
         # Main Layout using StackedWidget for page navigation (List <-> Form)
         self.video_list_layout = QVBoxLayout()
@@ -2864,11 +2983,11 @@ class MainApp(QWidget):
         input_layout.addWidget(QLabel("대본:"), 3, 0, Qt.AlignTop)
         input_layout.addWidget(self.input_script, 3, 1)
         
-        input_layout.addWidget(QLabel("이미지 스크립트:"), 4, 0, Qt.AlignTop)
-        input_layout.addWidget(self.input_img_script, 4, 1)
-        
-        input_layout.addWidget(QLabel("TTS 텍스트:"), 5, 0, Qt.AlignTop)
-        input_layout.addWidget(self.input_tts_text, 5, 1)
+        input_layout.addWidget(QLabel("TTS 텍스트:"), 4, 0, Qt.AlignTop)
+        input_layout.addWidget(self.input_tts_text, 4, 1)
+
+        input_layout.addWidget(QLabel("이미지 스크립트:"), 5, 0, Qt.AlignTop)
+        input_layout.addWidget(self.input_img_script, 5, 1)
 
         input_layout.addWidget(QLabel("설명:"), 6, 0, Qt.AlignTop)
         input_layout.addWidget(self.input_description, 6, 1)
@@ -3649,7 +3768,7 @@ class MainApp(QWidget):
             cursor = conn.cursor(dictionary=True)
             
             filter_type = self.combo_prompt_filter_type.currentText()
-            where_clause = "WHERE c.state = '1'"
+            where_clause = "WHERE c.state = '1' AND (p.use_yn = 'Y' OR p.use_yn IS NULL)"
             params = []
             
             if filter_type != '전체':
