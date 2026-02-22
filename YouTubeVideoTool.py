@@ -1333,9 +1333,15 @@ class MainApp(QWidget):
                     matched_families.add(family)
                     break 
         
-        # 4. 드롭다운 목록 업데이트 (메인 탭 & ATV 탭)
+        # 4. 드롭다운 목록 업데이트 (메인 탭, ATV 탭, Thumbnail 탭)
         combos = [self.combo_font]
         if hasattr(self, 'atv_combo_font'): combos.append(self.atv_combo_font)
+        
+        # 썸네일 탭의 각 줄 콤보박스 찾기
+        if hasattr(self, 'thumb_lines'):
+            for line_data in self.thumb_lines:
+                if 'font_combo' in line_data:
+                    combos.append(line_data['font_combo'])
         
         for cb in combos:
             cb.clear()
@@ -1359,11 +1365,13 @@ class MainApp(QWidget):
                         if "Gmarket Sans" in cb.itemText(i):
                             cb.setCurrentIndex(i); target_set = True; break
                 
+                # 3순위: Gmarket (일반)
                 if not target_set:
                     for i in range(cb.count()):
                         if "Gmarket" in cb.itemText(i):
                             cb.setCurrentIndex(i); target_set = True; break
                 
+                # 4순위: Nanum
                 if not target_set:
                     for i in range(cb.count()):
                         if "Nanum" in cb.itemText(i):
@@ -1372,23 +1380,6 @@ class MainApp(QWidget):
                 fallback_fonts = ["Malgun Gothic", "맑은 고딕", "Arial"]
                 available_fallbacks = [f for f in fallback_fonts if f in all_families]
                 cb.addItems(available_fallbacks if available_fallbacks else ["Arial"])
-            
-            # 2순위: Gmarket 아무거나
-            if not target_set:
-                for i in range(self.combo_font.count()):
-                    text = self.combo_font.itemText(i)
-                    if "Gmarket" in text:
-                        self.combo_font.setCurrentIndex(i)
-                        target_set = True
-                        break
-                        
-            # 3순위: Nanum
-            if not target_set:
-                for i in range(self.combo_font.count()):
-                    text = self.combo_font.itemText(i)
-                    if "Nanum" in text:
-                        self.combo_font.setCurrentIndex(i)
-                        break
                         
         else:
             # 매칭되는 게 없을 때의 폴백
@@ -4480,21 +4471,26 @@ class MainApp(QWidget):
             font_combo = QComboBox()
             font_combo.setMinimumWidth(150)
             
-            # Copy items & Set Default Font
+            # Copy items & Set Default Font from ATV Tab
             target_font = "Gmarket Sans TTF Bold"
             target_idx = 0
             
-            if hasattr(self, 'combo_font') and self.combo_font.count() > 0:
-                 for j in range(self.combo_font.count()):
-                     f_text = self.combo_font.itemText(j)
-                     font_combo.addItem(f_text)
-                     if target_font.replace(" ", "").lower() in f_text.replace(" ", "").lower():
-                         target_idx = j
+            # ATV 탭 콤보박스가 있으면 거기서 복사 (사용자 요청: 영상생성 폰트 따라가기)
+            source_combo = None
+            if hasattr(self, 'atv_combo_font'):
+                source_combo = self.atv_combo_font
+            elif hasattr(self, 'combo_font'):
+                source_combo = self.combo_font
+                
+            if source_combo and source_combo.count() > 0:
+                for j in range(source_combo.count()):
+                    f_text = source_combo.itemText(j)
+                    font_combo.addItem(f_text)
+                
+                # 현재 영상생성 탭에서 선택된 인덱스로 초기값 설정
+                font_combo.setCurrentIndex(source_combo.currentIndex())
             else:
                 font_combo.addItem("Arial")
-            
-            if font_combo.count() > target_idx:
-                font_combo.setCurrentIndex(target_idx)
             
             # Apply Defaults
             def_size, def_y, def_color = defaults[i]
