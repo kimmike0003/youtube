@@ -13,6 +13,7 @@ except ImportError:
     pass
 import time
 import re
+from PIL import Image
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QTextEdit, 
                              QPushButton, QLabel, QFileDialog, QHBoxLayout, 
                              QTabWidget, QComboBox, QSlider, QSpinBox, QGroupBox, QDoubleSpinBox, 
@@ -77,6 +78,21 @@ class CustomTabWidget(QWidget):
         btn = QPushButton(title)
         btn.setCheckable(True)
         btn.setFixedHeight(40) # 적당한 높이
+        
+        # 기본 스타일 즉시 적용 (윈도우 기본 파란색 방지)
+        btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2b2b2b;
+                color: #b1b1b1;
+                border: 1px solid #444;
+                font-family: 'Malgun Gothic';
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background-color: #333333;
+            }
+        """)
+        
         btn.clicked.connect(lambda checked=False: self.setCurrentIndex(self.stack.indexOf(widget)))
         
         idx = len(self.buttons)
@@ -95,12 +111,12 @@ class CustomTabWidget(QWidget):
         for i, btn in enumerate(self.buttons):
             if i == index:
                 btn.setChecked(True)
-                # Selected Style
+                # Selected Style (Deep Grey / Point Color)
                 btn.setStyleSheet("""
                     QPushButton {
                         background-color: #444444;
                         color: #ffffff;
-                        border: 1px solid #444;
+                        border: 1px solid #0078d4;
                         font-weight: bold;
                         font-family: 'Malgun Gothic';
                         font-size: 13px;
@@ -108,7 +124,7 @@ class CustomTabWidget(QWidget):
                 """)
             else:
                 btn.setChecked(False)
-                # Normal Style
+                # Normal Style (Dark Grey)
                 btn.setStyleSheet("""
                     QPushButton {
                         background-color: #2b2b2b;
@@ -150,94 +166,86 @@ class MainApp(QWidget):
         self.tabs = CustomTabWidget()
         layout.addWidget(self.tabs)
 
-        # ========== 1단 (Upper Row) ==========
+        # ========== 1단 (Upper Row): 6개 ==========
         
-        # 1. GenSpark Image (Originally 3rd, now 1st)
-        self.tab1 = QWidget()
-        self.initTab1()
-        self.tabs.addTab(self.tab1, "Ganspark Image")
-
-        # 2. ElevenLabs TTS
+        # 1. ElevenLabs TTS
         self.tab2 = QWidget()
         self.initTab2()
         self.tabs.addTab(self.tab2, "ElevenLabs TTS")
 
-        # 3. Audio Transcribe
-        self.tab_transcribe = QWidget()
-        self.initTabAudioTranscribe()
-        self.tabs.addTab(self.tab_transcribe, "Audio Transcribe")
+        # 2. GenSpark Image
+        self.tab1 = QWidget()
+        self.initTab1()
+        self.tabs.addTab(self.tab1, "Ganspark Image")
 
-        # Removed unused tabs (ImageFX, Gemini API)
-
-        # 4. Video Composite
-        self.tab3 = QWidget()
-        self.initTab3()
-        self.tabs.addTab(self.tab3, "자막설정")
-
-        # 8. Grok Generation (Moved to here)
+        # 3. 그록생성
         self.tab_grok_gen = QWidget()
         self.initTabGrokGen()
         self.tabs.addTab(self.tab_grok_gen, "그록생성")
 
-        # 5. Video Dubbing
-        self.tab6 = QWidget()
-        self.initTab6()
-        self.tabs.addTab(self.tab6, "그록동영상")
-
-        # 6. Video Effects
-        self.tab5 = QWidget()
-        self.initTab5()
-        self.tabs.addTab(self.tab5, "영상효과")
-
-        # ========== 2단 (Lower Row) ==========
-
-        # 7. Video Concat
-        self.tab4 = QWidget()
-        self.initTab4()
-        self.tabs.addTab(self.tab4, "최종영상")
-
-
-
-        # 8. Audio To Video
+        # 4. 영상 생성 (Audio To Video)
         self.tab_audio_video = QWidget()
         self.initTabAudioToVideo()
-        self.tabs.addTab(self.tab_audio_video, "Audio To Video")
+        self.tabs.addTab(self.tab_audio_video, "영상생성")
 
-        # 9. Video List
-        self.tab_video_list = QWidget()
-        self.initTabVideoList()
-        self.tabs.addTab(self.tab_video_list, "영상관리")
+        # 5. 영상합치기 (원래 최종영상)
+        self.tab4 = QWidget()
+        self.initTab4()
+        self.tabs.addTab(self.tab4, "영상합치기")
 
-        # 10. Prompt
-        self.tab_prompt = QWidget()
-        self.initTabPrompt()
-        self.tabs.addTab(self.tab_prompt, "프롬프트")
-
-        # 11. 숏츠생성 (Shorts)
-        self.tab_shorts = QWidget()
-        self.initTabShorts()
-        self.tabs.addTab(self.tab_shorts, "금은숏츠")
-
-        # 12. Gold Price Shorts
-        self.tab_gold_price = QWidget()
-        self.initTabGoldPrice()
-        self.tabs.addTab(self.tab_gold_price, "금시세")
-
-        # 13. Thumbnail
+        # 6. 썸네일
         self.tab_thumbnail = QWidget()
         self.initTabThumbnail()
         self.tabs.addTab(self.tab_thumbnail, "썸네일")
 
-        # 14. YouTube 분석 (Moved to last)
+        # ========== 2단 (Lower Row): 6개 ==========
+
+        # 7. 금시세
+        self.tab_gold_price = QWidget()
+        self.initTabGoldPrice()
+        self.tabs.addTab(self.tab_gold_price, "금시세")
+
+        # 8. 금은숏츠
+        self.tab_shorts = QWidget()
+        self.initTabShorts()
+        self.tabs.addTab(self.tab_shorts, "금은숏츠")
+
+        # 9. 대본리스트
+        self.tab_video_list = QWidget()
+        self.initTabVideoList()
+        self.tabs.addTab(self.tab_video_list, "대본리스트")
+
+        # 10. 프롬프트
+        self.tab_prompt = QWidget()
+        self.initTabPrompt()
+        self.tabs.addTab(self.tab_prompt, "프롬프트")
+
+        # 11. Audio Transcribe
+        self.tab_transcribe = QWidget()
+        self.initTabAudioTranscribe()
+        self.tabs.addTab(self.tab_transcribe, "Audio Transcribe")
+
+        # 12. YouTube 분석
         self.tab7 = QWidget()
         self.initTab7()
         self.tabs.addTab(self.tab7, "YouTube 분석")
 
-
-
-
+        # ========== Hidden 처리된 탭들 (초기화는 하되 addTab은 하지 않음) ==========
+        
+        self.tab3 = QWidget() # 자막설정
+        self.initTab3()
+        
+        self.tab5 = QWidget() # 영상효과
+        self.initTab5()
+        
+        self.tab6 = QWidget() # 그록동영상
+        self.initTab6()
 
         self.setLayout(layout)
+        
+        # 모든 UI 초기화 후 폰트 및 색상 인디케이터 갱신
+        self.load_custom_fonts()
+        self.update_color_indicators()
 
     def initTab1(self):
         layout = QVBoxLayout()
@@ -524,9 +532,9 @@ class MainApp(QWidget):
         layout.setSpacing(5)
         layout.setContentsMargins(10, 10, 10, 10)
 
-        # 기본 폰트 로드
-        self.load_custom_fonts()
-        self.update_color_indicators()
+        # 기본 폰트 로드는 MainApp.initUI 끝에서 일괄 수행
+        # self.load_custom_fonts()
+        # self.update_color_indicators()
 
         self.tab3.setLayout(layout)
 
@@ -558,7 +566,7 @@ class MainApp(QWidget):
         
         self.spin_font_size = QSpinBox()
         self.spin_font_size.setRange(10, 200)
-        self.spin_font_size.setValue(60)
+        self.spin_font_size.setValue(75)
         
         style_layout.addWidget(QLabel("폰트 선택:"), 2, 0)
         style_layout.addWidget(self.combo_font, 2, 1, 1, 2)
@@ -1130,25 +1138,33 @@ class MainApp(QWidget):
                  self.concat_log.append("⚠️ 결과 파일을 찾을 수 없어 SRT 생성을 건너뜁니다.")
 
     def update_color_indicators(self):
-        # 선택된 색상을 작은 네모로 표시
-        self.ind_text_color.setStyleSheet(f"background-color: {self.color_text}; border: 1px solid white;")
-        
-        out_col = self.color_outline if self.color_outline.lower() != "none" else "transparent"
-        self.ind_outline_color.setStyleSheet(f"background-color: {out_col}; border: 1px solid white;")
-        
-        # 배경색은 투명도 슬라이더 값 반영하여 인디케이터에 표시
-        opacity = int(self.slider_bg_opacity.value() * 2.55)
-        if self.color_bg.lower() == "transparent" or not self.checkbox_use_bg.isChecked():
-            self.ind_bg_color.setStyleSheet("background-color: transparent; border: 1px solid white;")
-        else:
-            col = QColor(self.color_bg)
-            self.ind_bg_color.setStyleSheet(f"background-color: rgba({col.red()}, {col.green()}, {col.blue()}, {self.slider_bg_opacity.value()/100.0}); border: 1px solid white;")
+        # 1. 메인 자막 탭 인디케이터
+        if hasattr(self, 'ind_text_color'):
+            self.ind_text_color.setStyleSheet(f"background-color: {self.color_text}; border: 1px solid white;")
+            out_col = self.color_outline if self.color_outline.lower() != "none" else "transparent"
+            if not self.checkbox_use_outline.isChecked(): out_col = "transparent"
+            self.ind_outline_color.setStyleSheet(f"background-color: {out_col}; border: 1px solid white;")
             
-        # 테두리 인디케이터 투명 처리
-        if not self.checkbox_use_outline.isChecked():
-            self.ind_outline_color.setStyleSheet("background-color: transparent; border: 1px solid white;")
-        else:
-            self.ind_outline_color.setStyleSheet(f"background-color: {self.color_outline}; border: 1px solid white;")
+            bg_opacity = self.slider_bg_opacity.value() / 100.0
+            if self.color_bg.lower() == "transparent" or not self.checkbox_use_bg.isChecked():
+                self.ind_bg_color.setStyleSheet("background-color: transparent; border: 1px solid white;")
+            else:
+                col = QColor(self.color_bg)
+                self.ind_bg_color.setStyleSheet(f"background-color: rgba({col.red()}, {col.green()}, {col.blue()}, {bg_opacity}); border: 1px solid white;")
+
+        # 2. ATV(영상 제작) 탭 인디케이터
+        if hasattr(self, 'atv_ind_text_color'):
+            self.atv_ind_text_color.setStyleSheet(f"background-color: {self.atv_color_text}; border: 1px solid white;")
+            atv_out_col = self.atv_color_outline if self.atv_color_outline.lower() != "none" else "transparent"
+            if not self.atv_checkbox_use_outline.isChecked(): atv_out_col = "transparent"
+            self.atv_ind_outline_color.setStyleSheet(f"background-color: {atv_out_col}; border: 1px solid white;")
+            
+            atv_bg_opacity = self.atv_slider_bg_opacity.value() / 100.0
+            if self.atv_color_bg.lower() == "transparent" or not self.atv_checkbox_use_bg.isChecked():
+                self.atv_ind_bg_color.setStyleSheet("background-color: transparent; border: 1px solid white;")
+            else:
+                col = QColor(self.atv_color_bg)
+                self.atv_ind_bg_color.setStyleSheet(f"background-color: rgba({col.red()}, {col.green()}, {col.blue()}, {atv_bg_opacity}); border: 1px solid white;")
 
     def pick_color(self, target):
         from PyQt5.QtWidgets import QColorDialog
@@ -1158,7 +1174,10 @@ class MainApp(QWidget):
             if target == 'text': self.color_text = hex_color
             elif target == 'outline': self.color_outline = hex_color
             elif target == 'bg': self.color_bg = hex_color
-            self.update_color_indicators() # 네모칸 색상 갱신
+            elif target == 'atv_text': self.atv_color_text = hex_color
+            elif target == 'atv_outline': self.atv_color_outline = hex_color
+            elif target == 'atv_bg': self.atv_color_bg = hex_color
+            self.update_color_indicators()
 
     def parse_subtitles(self, text):
         # returns { major_id: [ {"original": "...", "tts": "..."}, ... ] }
@@ -1169,7 +1188,9 @@ class MainApp(QWidget):
         # 패턴: 12-34 원본: ... TTS: ... (다음 ID 패턴이나 헤더가 나오기 전까지)
         # Lookahead: 다음 "숫자-숫자 원본:" 혹은 "숫자. {}" 헤더 혹은 문장 끝
         
-        regex_pattern = r'(\d+)-(\d+)\s*원본:(.*?)\s*TTS:(.*?)(?=\s*\d+-\d+\s*원본:|\s*\d+\.\s*\{|$)'
+        # 신규 패턴: 1. 원본: ... TTS: ... 또는 1-1 원본: ... TTS: ...
+        # (?:^|\s) 는 항 행의 시작이나 공백 뒤에 숫자가 오도록 함
+        regex_pattern = r'(?:^|\s)(\d+)(?:[.\-])(\d+)?\s*원본:(.*?)\s*TTS:(.*?)(?=\s*\d+[\.\-]\d*\s*원본:|\s*\d+\.\s*\{|$)'
         
         # re.DOTALL: .이 개행문자도 포함 (여러 줄 걸친 내용도 매칭)
         matches = list(re.finditer(regex_pattern, text, re.DOTALL | re.IGNORECASE))
@@ -1312,24 +1333,45 @@ class MainApp(QWidget):
                     matched_families.add(family)
                     break 
         
-        # 4. 드롭다운 목록 업데이트
-        self.combo_font.clear()
+        # 4. 드롭다운 목록 업데이트 (메인 탭 & ATV 탭)
+        combos = [self.combo_font]
+        if hasattr(self, 'atv_combo_font'): combos.append(self.atv_combo_font)
         
-        if matched_families:
-            final_list = sorted(list(matched_families))
-            self.combo_font.addItems(final_list)
-            
-            # 우선순위: Gmarket > Nanum > Malgun
-            # 사용자가 "GmarketSansTTFBold"를 대표로 언급했으므로 'Gmarket Sans'가 포함된 걸 최우선으로 찾음
-            target_set = False
-            
-            # 1순위: Gmarket Sans (Bold 선호하지만 Family 레벨이므로 Gmarket Sans 찾기)
-            for i in range(self.combo_font.count()):
-                text = self.combo_font.itemText(i)
-                if "Gmarket Sans" in text: # Gmarket Sans TTF 등
-                    self.combo_font.setCurrentIndex(i)
-                    target_set = True
-                    break
+        for cb in combos:
+            cb.clear()
+            if matched_families:
+                final_list = sorted(list(matched_families))
+                cb.addItems(final_list)
+                
+                # 우선순위 설정: Gmarket Sans TTF Bold 최우선
+                target_set = False
+                # 1순위: Gmarket Sans TTF Bold (정확한 매칭 시도)
+                for i in range(cb.count()):
+                    text = cb.itemText(i)
+                    if "Gmarket Sans" in text and "Bold" in text:
+                        cb.setCurrentIndex(i)
+                        target_set = True
+                        break
+                
+                # 2순위: Gmarket Sans
+                if not target_set:
+                    for i in range(cb.count()):
+                        if "Gmarket Sans" in cb.itemText(i):
+                            cb.setCurrentIndex(i); target_set = True; break
+                
+                if not target_set:
+                    for i in range(cb.count()):
+                        if "Gmarket" in cb.itemText(i):
+                            cb.setCurrentIndex(i); target_set = True; break
+                
+                if not target_set:
+                    for i in range(cb.count()):
+                        if "Nanum" in cb.itemText(i):
+                            cb.setCurrentIndex(i); break
+            else:
+                fallback_fonts = ["Malgun Gothic", "맑은 고딕", "Arial"]
+                available_fallbacks = [f for f in fallback_fonts if f in all_families]
+                cb.addItems(available_fallbacks if available_fallbacks else ["Arial"])
             
             # 2순위: Gmarket 아무거나
             if not target_set:
@@ -1417,8 +1459,8 @@ class MainApp(QWidget):
                     tasks.append((combined_tts, filename, items))
             self.tts_log.append(f"📋 배치 모드 감지: {len(tasks)}개의 파일 생성 예정")
         else:
-            # 패턴 없으면 전체 텍스트를 하나로 생성 (UUID 파일명)
-            tasks.append((text, None, [{"original": text, "tts": text}]))
+            # 패턴 없으면 전체 텍스트를 하나로 생성 (기본 파일명 tts_output.mp3)
+            tasks.append((text, "tts_output.mp3", [{"original": text, "tts": text}]))
 
         self.btn_generate_tts.setEnabled(False)
         self.btn_stop_tts.setEnabled(True)
@@ -1489,10 +1531,8 @@ class MainApp(QWidget):
             # --- 병합 로직 ---
             if success_count == len(tasks) and not self.stop_tts_flag:
                 if do_merge:
-                    if len(tasks) > 1:
-                        self._merge_audio_files_thread(tasks, custom_dir)
-                    else:
-                        self.log_signal.emit("ℹ️ 단일 파일이므로 병합 과정을 생략합니다.")
+                    # 단일 파일이라도 병합 체크 시 merge.mp3, merge.srt 생성을 위해 실행
+                    self._merge_audio_files_thread(tasks, custom_dir)
                 else:
                     self.log_signal.emit("ℹ️ 옵션에 따라 병합을 건너뜁니다.")
 
@@ -2176,34 +2216,113 @@ class MainApp(QWidget):
 
     def initTabAudioToVideo(self):
         layout = QVBoxLayout()
-        layout.addWidget(QLabel("🎬 MP3 + SRT + 이미지를 결합하여 영상을 제작합니다."))
-        layout.addWidget(QLabel("   - 폴더 내의 1.mp3, 1.srt 파일을 찾아 1.mp4를 만듭니다."))
-        layout.addWidget(QLabel("   - SRT 인덱스에 맞는 이미지(1.jpg, 2.jpg...)가 있으면 해당 시점에 배경으로 사용합니다."))
-        layout.addWidget(QLabel("   - 자막 스타일은 'Video Composite' 탭의 설정을 따릅니다."))
+        layout.addWidget(QLabel("🎬 MP3 + SRT + 이미지/영상을 결합하여 영상을 제작합니다."))
         
-        # Folder Selection
-        dir_layout = QHBoxLayout()
+        # 1. Folder Selection Group
+        dir_group = QGroupBox("작업 환경 설정")
+        dir_layout = QGridLayout()
         self.atv_dir = QLineEdit()
         btn_dir = QPushButton("작업 폴더 선택")
         btn_dir.clicked.connect(lambda: self.browse_folder(self.atv_dir))
-        dir_layout.addWidget(QLabel("작업 폴더:"))
-        dir_layout.addWidget(self.atv_dir)
-        dir_layout.addWidget(btn_dir)
-        layout.addLayout(dir_layout)
+        dir_layout.addWidget(QLabel("작업 폴더:"), 0, 0)
+        dir_layout.addWidget(self.atv_dir, 0, 1)
+        dir_layout.addWidget(btn_dir, 0, 2)
+        dir_group.setLayout(dir_layout)
+        layout.addWidget(dir_group)
+
+        # 2. Subtitle Style Group (Exactly like tab3)
+        style_group = QGroupBox("자막 스타일 설정 (이 탭 전용)")
+        style_layout = QGridLayout()
+        
+        # 폰트 폴더
+        self.atv_font_folder_path = QLineEdit(r"D:\youtube\fonts")
+        btn_font_folder = QPushButton("찾기")
+        btn_font_folder.clicked.connect(lambda: self.browse_folder(self.atv_font_folder_path, self.load_custom_fonts))
+        style_layout.addWidget(QLabel("폰트 폴더:"), 0, 0)
+        style_layout.addWidget(self.atv_font_folder_path, 0, 1, 1, 2)
+        style_layout.addWidget(btn_font_folder, 0, 3)
+
+        # 폰트 및 크기
+        self.atv_combo_font = QComboBox()
+        self.atv_spin_font_size = QSpinBox()
+        self.atv_spin_font_size.setRange(10, 200)
+        self.atv_spin_font_size.setValue(75)
+        style_layout.addWidget(QLabel("폰트 선택:"), 1, 0)
+        style_layout.addWidget(self.atv_combo_font, 1, 1)
+        style_layout.addWidget(QLabel("크기:"), 1, 2)
+        style_layout.addWidget(self.atv_spin_font_size, 1, 3)
+
+        # 색상 초기화 (사용자 요청: 검정 글자, 흰색 테두리)
+        self.atv_color_text = "black"
+        self.atv_color_outline = "white"
+        self.atv_color_bg = "Transparent"
+
+        # 글자색
+        self.atv_btn_text_color = QPushButton("글자색")
+        self.atv_btn_text_color.clicked.connect(lambda: self.pick_color('atv_text'))
+        self.atv_ind_text_color = QLabel()
+        self.atv_ind_text_color.setFixedSize(20, 20)
+        
+        # 테두리색
+        self.atv_btn_outline_color = QPushButton("테두리색")
+        self.atv_btn_outline_color.clicked.connect(lambda: self.pick_color('atv_outline'))
+        self.atv_ind_outline_color = QLabel()
+        self.atv_ind_outline_color.setFixedSize(20, 20)
+
+        # 테두리 사용 체크박스
+        self.atv_checkbox_use_outline = QCheckBox("테두리 사용")
+        self.atv_checkbox_use_outline.setChecked(True)
+        self.atv_checkbox_use_outline.stateChanged.connect(self.update_color_indicators)
+
+        style_layout.addWidget(self.atv_btn_text_color, 2, 0)
+        style_layout.addWidget(self.atv_ind_text_color, 2, 1)
+        style_layout.addWidget(self.atv_btn_outline_color, 2, 2)
+        style_layout.addWidget(self.atv_ind_outline_color, 2, 3)
+        style_layout.addWidget(self.atv_checkbox_use_outline, 2, 4)
+
+        # 배경색 설정
+        self.atv_checkbox_use_bg = QCheckBox("배경색 사용")
+        self.atv_checkbox_use_bg.setChecked(False)
+        self.atv_checkbox_use_bg.stateChanged.connect(self.update_color_indicators)
+        self.atv_btn_bg_color = QPushButton("배경색")
+        self.atv_btn_bg_color.clicked.connect(lambda: self.pick_color('atv_bg'))
+        self.atv_ind_bg_color = QLabel()
+        self.atv_ind_bg_color.setFixedSize(20, 20)
+
+        style_layout.addWidget(self.atv_checkbox_use_bg, 3, 0)
+        style_layout.addWidget(self.atv_btn_bg_color, 3, 1)
+        style_layout.addWidget(self.atv_ind_bg_color, 3, 2)
+
+        # 투명도 및 볼륨
+        style_layout.addWidget(QLabel("배경 투명도:"), 4, 0)
+        self.atv_slider_bg_opacity = QSlider(Qt.Horizontal)
+        self.atv_slider_bg_opacity.setRange(0, 100)
+        self.atv_slider_bg_opacity.setValue(80)
+        self.atv_lbl_bg_opacity = QLabel("80%")
+        self.atv_slider_bg_opacity.valueChanged.connect(self.update_color_indicators)
+        self.atv_slider_bg_opacity.valueChanged.connect(lambda v: self.atv_lbl_bg_opacity.setText(f"{v}%"))
+        
+        style_layout.addWidget(self.atv_slider_bg_opacity, 4, 1, 1, 2)
+        style_layout.addWidget(self.atv_lbl_bg_opacity, 4, 3)
+
+        style_group.setLayout(style_layout)
+        layout.addWidget(style_group)
         
         # Start Button
-        self.btn_atv_start = QPushButton("영상 생성 시작")
-        self.btn_atv_start.setStyleSheet("height: 40px; font-weight: bold; background-color: #673AB7; color: white;")
+        self.btn_atv_start = QPushButton("🚀 영상 생성 시작")
+        self.btn_atv_start.setStyleSheet("height: 50px; font-weight: bold; background-color: #673AB7; color: white; font-size: 16px;")
         self.btn_atv_start.clicked.connect(self.start_audio_to_video)
         layout.addWidget(self.btn_atv_start)
         
         # Log
         self.atv_log = QTextEdit()
         self.atv_log.setReadOnly(True)
-        self.atv_log.setStyleSheet("background-color: #1E1E1E; color: #D4D4D4;")
+        self.atv_log.setStyleSheet("background-color: #1E1E1E; color: #D4D4D4; font-family: 'Consolas';")
         layout.addWidget(self.atv_log)
         
         self.tab_audio_video.setLayout(layout)
+        # 초기 컬러 인디케이터 갱신
+        self.update_color_indicators()
 
     def start_audio_to_video(self):
         target_dir = self.atv_dir.text().strip()
@@ -2211,17 +2330,17 @@ class MainApp(QWidget):
             QMessageBox.warning(self, "경고", "올바른 작업 폴더를 선택해주세요.")
             return
 
-        # 스타일 설정 읽기 (tab3의 컨트롤 재사용)
+        # 스타일 설정 읽기 (이 탭 전 전용 컨트롤 사용)
         style = {
-            'font_family': self.combo_font.currentText(),
-            'font_size': self.spin_font_size.value(),
-            'text_color': self.color_text,
-            'outline_color': self.color_outline,
-            'bg_color': self.color_bg,
-            'bg_opacity': int(self.slider_bg_opacity.value() * 2.55), # 0-100 -> 0-255
-            'use_bg': self.checkbox_use_bg.isChecked(),
-            'use_outline': self.checkbox_use_outline.isChecked(),
-            'font_folder': self.font_folder_path.text().strip()
+            'font_family': self.atv_combo_font.currentText(),
+            'font_size': self.atv_spin_font_size.value(),
+            'text_color': self.atv_color_text,
+            'outline_color': self.atv_color_outline,
+            'bg_color': self.atv_color_bg,
+            'bg_opacity': int(self.atv_slider_bg_opacity.value() * 2.55),
+            'use_bg': self.atv_checkbox_use_bg.isChecked(),
+            'use_outline': self.atv_checkbox_use_outline.isChecked(),
+            'font_folder': self.atv_font_folder_path.text().strip()
         }
         
         self.atv_log.append(f"🚀 작업 시작: {target_dir}")
@@ -4264,15 +4383,17 @@ class MainApp(QWidget):
         
         final_output_path = os.path.join(output_dir, f"Gold_Shorts_{timestamp}.mp4")
         
-        # Style (Default - Malgun Gothic, 70px White with Black Outline)
+        # 설정값 수집 (자막 스타일 탭 설정 공유)
         style = {
-            "font_family": "Malgun Gothic",
-            "font_size": 70,
-            "text_color": "#FFFFFF",
-            "outline_color": "#000000",
-            "bg_color": "Transparent",
-            "use_outline": True,
-            "use_bg": False
+            'font_family': self.combo_font.currentText(),
+            'font_size': self.spin_font_size.value(),
+            'text_color': self.color_text,
+            'outline_color': self.color_outline,
+            'bg_color': self.color_bg,
+            'bg_opacity': int(self.slider_bg_opacity.value() * 2.55),
+            'use_bg': self.checkbox_use_bg.isChecked(),
+            'use_outline': self.checkbox_use_outline.isChecked(),
+            'font_folder': self.font_folder_path.text().strip()
         }
         
         try:
@@ -5158,457 +5279,267 @@ class AudioToVideoWorker(QThread):
     def run(self):
         import shutil
         import time
+        import re
+        import random
         start_time = time.time()
         try:
-            # Create Temp Dir
-
-            # 1. FFmpeg setup
+            # 1. FFmpeg 준비
             try:
                 import imageio_ffmpeg
                 ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-            except ImportError:
+            except:
                 ffmpeg_exe = "ffmpeg"
                 
+            # 2. 파일 목록 및 SRT 로드
             files = os.listdir(self.target_dir)
             mp3_files = [f for f in files if f.lower().endswith('.mp3')]
+            srt_files = [f for f in files if f.lower().endswith('.srt')]
             
-            if not mp3_files:
-                self.log_signal.emit("⚠️ MP3 파일이 없습니다.")
-                self.finished.emit("작업 없음")
+            if not mp3_files or not srt_files:
+                self.error.emit("MP3 또는 SRT 파일이 폴더에 없습니다.")
                 return
 
-            total = len(mp3_files)
-            count = 0
+            # 가장 적절한 쌍 선택 (첫 번째 mp3와 첫 번째 srt)
+            mp3_path = os.path.join(self.target_dir, mp3_files[0])
+            srt_path = os.path.join(self.target_dir, srt_files[0])
+            base_name = os.path.splitext(mp3_files[0])[0]
+            out_path = os.path.join(self.target_dir, "final_video.mp4")
+
+            self.log_signal.emit(f"🚀 작업 시작: {mp3_files[0]} + {srt_files[0]}")
+
+            # 3. 오디오 길이 확인
+            duration = self.get_audio_duration(ffmpeg_exe, mp3_path)
+            if duration == 0:
+                self.error.emit("오디오 길이를 측정할 수 없습니다.")
+                return
+
+            # 4. SRT 파싱 (정규식 기반으로 개선하여 누락 방지)
+            segments = self.parse_srt_robust(srt_path)
+            self.log_signal.emit(f"📊 SRT 파싱 완료: {len(segments)}개 트랙 발견")
+
+            # 5. 모든 세그먼트에 대해 배경 파일 매핑 (Hold 로직 강화)
+            self.log_signal.emit("🔍 파일 매칭 및 배경 유지 로직 가동...")
             
-            # Temp Folder for ASS or Lists
-            # Ensure it exists
-            if not os.path.exists(self.temp_sub_dir):
-                os.makedirs(self.temp_sub_dir)
+            if os.path.exists(self.temp_sub_dir):
+                shutil.rmtree(self.temp_sub_dir, ignore_errors=True)
+            os.makedirs(self.temp_sub_dir, exist_ok=True)
 
-            for mp3 in mp3_files:
-                base_name = os.path.splitext(mp3)[0]
-                srt_file = base_name + ".srt"
-                srt_path = os.path.join(self.target_dir, srt_file)
-                mp3_path = os.path.join(self.target_dir, mp3)
-                # 최종 mp4 파일명을 final_video.mp4로 고정
-                out_path = os.path.join(self.target_dir, "final_video.mp4")
+            # 기본 배경 (검정 화면 생성)
+            black_p = os.path.join(self.temp_sub_dir, "black_start.png")
+            Image.new('RGB', (1920, 1080), (0,0,0)).save(black_p)
+            
+            last_found_file = black_p
+            for seg in segments:
+                idx = seg['index']
+                match_found = None
+                # 파일명 시작이 "번호." 또는 "번호 " 또는 "번호_" 인 것 찾기
+                pattern = re.compile(rf"^{idx}[.\s_].*")
+                for f_name in files:
+                    if pattern.match(f_name.lower()):
+                        match_found = os.path.join(self.target_dir, f_name)
+                        break
                 
-                if not os.path.exists(srt_path):
-                    self.log_signal.emit(f"⚠️ SRT 없음 건너뜀: {srt_file}")
-                    continue
-                
-                self.log_signal.emit(f"🎬 생성 중 (High Speed): {base_name}.mp4 ...")
-                
-                # 1. Get Duration
-                # We need audio duration to fill images until end.
-                # Let's use ffprobe.
-                duration = self.get_audio_duration(ffmpeg_exe, mp3_path)
-                if duration == 0:
-                    self.log_signal.emit(f"   ⚠️ 오디오 길이 확인 불가: {mp3}")
-                    continue
-
-                # 2. Parse SRT for Subtitles and Images
-                segments = self.parse_srt(srt_path)
-
-                # [Restore] 이미지 처리 로직 (사용자 요청: SRT 인덱스번호와 매칭)
-                TARGET_W, TARGET_H = 1920, 1080
-                FPS = 30
-                
-                # 3. Create Concat List for Images
-                concat_list_path = os.path.join(self.temp_sub_dir, f"inputs_{base_name}.txt")
-                
-                # Logic: Find images matching SRT indices
-                checkpoints = []
-                for seg in segments:
-                    idx = seg['index']
-                    t = seg['start']
-                    img_name = None
-                    for ext in ['.jpg', '.png', '.webp', '.jpeg']:
-                        check = os.path.join(self.target_dir, f"{idx}{ext}")
-                        if os.path.exists(check):
-                            img_name = check
-                            break
-                    
-                    if img_name:
-                        checkpoints.append((t, img_name))
-                
-                checkpoints.sort(key=lambda x: x[0])
-                
-                # 4. Process Images to Ensure Unified Resolution (1920x1080)
-                unified_img_dir = os.path.join(self.temp_sub_dir, f"scaled_{base_name}")
-                os.makedirs(unified_img_dir, exist_ok=True)
-                
-                processed_checkpoints = []
-                for t, img_p in checkpoints:
-                    img_name_only = os.path.basename(img_p)
-                    scaled_p = os.path.join(unified_img_dir, f"proc_{img_name_only}.jpg")
-                    try:
-                        with Image.open(img_p) as test_img:
-                            if test_img.mode != 'RGB': test_img = test_img.convert('RGB')
-                            iw, ih = test_img.size
-                            aspect = iw / ih
-                            target_aspect = TARGET_W / TARGET_H
-                            if aspect > target_aspect:
-                                new_w = TARGET_W; new_h = int(TARGET_W / aspect)
-                            else:
-                                new_h = TARGET_H; new_w = int(TARGET_H * aspect)
-                            resized = test_img.resize((new_w, new_h), Image.LANCZOS)
-                            final_bg = Image.new('RGB', (TARGET_W, TARGET_H), (0, 0, 0))
-                            offset = ((TARGET_W - new_w) // 2, (TARGET_H - new_h) // 2)
-                            final_bg.paste(resized, offset)
-                            # PNG로 저장하여 검정 배경(PNG)과의 포맷 불일치 방지
-                            final_bg.save(scaled_p, "PNG")
-                            processed_checkpoints.append((t, scaled_p))
-                    except:
-                        pass
-                
-                # Sync Fix: Ensure timeline starts at 0.0
-                if processed_checkpoints:
-                    processed_checkpoints.sort(key=lambda x: x[0])
-                    if processed_checkpoints[0][0] > 0.001:
-                        black_p = os.path.join(self.temp_sub_dir, "black_gap_start.png")
-                        if not os.path.exists(black_p):
-                            Image.new('RGB', (TARGET_W, TARGET_H), (0,0,0)).save(black_p)
-                        processed_checkpoints.insert(0, (0.0, black_p))
+                if match_found:
+                    seg['source'] = match_found
+                    last_found_file = match_found
                 else:
-                    black_p = os.path.join(self.temp_sub_dir, "black_full.png")
-                    if not os.path.exists(black_p):
-                        Image.new('RGB', (TARGET_W, TARGET_H), (0,0,0)).save(black_p)
-                    processed_checkpoints = [(0.0, black_p)]
+                    seg['source'] = last_found_file # 이전 파일 유지 (Hold)
 
-                # Write Concat List
-                with open(concat_list_path, "w", encoding='utf-8') as f:
-                    for i, (t, img_p) in enumerate(processed_checkpoints):
-                        safe_p = img_p.replace("\\", "/")
-                        if i < len(processed_checkpoints) - 1:
-                            dur = processed_checkpoints[i+1][0] - t
-                            f.write(f"file '{safe_p}'\n")
-                            f.write(f"duration {dur:.3f}\n")
-                        else:
-                            dur = duration - t
-                            if dur < 0.1: dur = 0.5
-                            f.write(f"file '{safe_p}'\n")
-                            f.write(f"duration {dur:.3f}\n")
-                    # FFmpeg requirement: repeat last file
-                    f.write(f"file '{processed_checkpoints[-1][1].replace('\\', '/')}'\n")
-                
-                self.fix_concat_file(concat_list_path)
+            # 6. 비디오 조각 생성 (영상 vs 이미지 분기 처리)
+            unified_video_dir = os.path.join(self.temp_sub_dir, "chunks")
+            if not os.path.exists(unified_video_dir): os.makedirs(unified_video_dir)
+            
+            # 체크포인트 추출 (배경이 실제로 바뀌는 시점만)
+            checkpoints = []
+            if segments:
+                curr_src = None
+                for seg in segments:
+                    if seg['source'] != curr_src:
+                        checkpoints.append({'start': seg['start'], 'source': seg['source']})
+                        curr_src = seg['source']
+                # 첫 시작점 보정
+                checkpoints[0]['start'] = 0.0
 
-                
-                # 5. Generate Subtitle PNGs (Identical to Video Composite)
-                FPS = 30
-                subtitle_inputs = [] # (path, start_t, end_t)
-                temp_files = []
-                
-                if segments:
-                    for idx_s, seg in enumerate(segments):
-                        text = seg['text']
-                        start_t = seg['start']
-                        end_t = seg['end']
-                        
-                        if start_t >= duration: continue
-                        real_end = min(end_t, duration)
-                        if real_end <= start_t:
-                            real_end = min(start_t + 3.0, duration)
-                        if real_end <= start_t: continue
-                        
-                        # Gap Filling
-                        if idx_s < len(segments) - 1:
-                            next_start = segments[idx_s+1]['start']
-                            if 0 < (next_start - real_end) < 0.5:
-                                real_end = next_start
-                                
-                        rgba_arr = self.create_text_image(text, (TARGET_W, TARGET_H))
-                        sub_filename = f"sub_{base_name}_{idx_s}.png"
-                        sub_path = os.path.join(self.temp_sub_dir, sub_filename)
-                        
-                        result_img = Image.fromarray(rgba_arr, 'RGBA')
-                        result_img.save(sub_path)
-                        temp_files.append(sub_path)
-                        subtitle_inputs.append((sub_path, start_t, real_end))
+            # 조각 생성 루프
+            ts_list = []
+            FPS_OUT = 30
+            UW, UH = 2560, 1440 # 줌용 고해상도
+            VW, VH = 1920, 1080 # 최종 출력
 
-                # 6. Run FFmpeg
-                cmd = [ffmpeg_exe, "-y", "-fflags", "+genpts"]
-                # Input 0: Image Concat List
-                cmd.extend(["-f", "concat", "-safe", "0", "-i", concat_list_path])
-                cmd.extend(["-i", mp3_path]) # Input 1 (Audio)
-                # [Input 2] Subtitles Concat
-                concat_sub_list_p = os.path.join(self.temp_sub_dir, f"subs_{base_name}.txt")
-                transparent_p = os.path.join(self.temp_sub_dir, "transparent.png")
-                if not os.path.exists(transparent_p):
-                    Image.new('RGBA', (TARGET_W, TARGET_H), (0,0,0,0)).save(transparent_p)
-
-                with open(concat_sub_list_p, "w", encoding='utf-8') as f:
-                    last_time_s = 0.0
-                    for s_p, s_t, e_t in subtitle_inputs:
-                        gap = s_t - last_time_s
-                        if gap > 0.001:
-                            f.write(f"file '{transparent_p}'\n")
-                            f.write(f"duration {gap:.3f}\n")
-                        dur = e_t - s_t
-                        if dur < 0.001: dur = 0.1
-                        f.write(f"file '{s_p}'\n")
-                        f.write(f"duration {dur:.3f}\n")
-                        last_time_s = e_t
-                    if last_time_s < duration:
-                        f.write(f"file '{transparent_p}'\n")
-                        f.write(f"duration {duration - last_time_s:.3f}\n")
-                    if subtitle_inputs:
-                        # FFmpeg concat demuxer: Last entry should have a small duration or be repeated for EOF
-                        f.write(f"file '{subtitle_inputs[-1][0]}'\n")
-                        f.write(f"duration 0.1\n") # Minimal duration to trigger EOF
+            for i, cp in enumerate(checkpoints):
+                start_t = cp['start']
+                end_t = checkpoints[i+1]['start'] if i < len(checkpoints)-1 else duration
+                if end_t <= start_t: continue
                 
-                self.fix_concat_file(concat_sub_list_p)
-                cmd.extend(["-f", "concat", "-safe", "0", "-i", concat_sub_list_p])
+                dur = end_t - start_t
+                ts_path = os.path.join(unified_video_dir, f"chunk_{i}.ts")
+                src = cp['source']
+                is_vid = src.lower().endswith(('.mp4', '.mov', '.avi', '.mkv', '.wmv'))
                 
-                # 이미지 스트림과 자막 스트림의 포맷을 yuv420p로 강제 통일하여 메모리 누수 방지
-                filter_parts = [f"[0:v]format=yuv420p,fps={FPS},setsar=1:1[v_bg]"]
-                final_v_label = "[v_bg]"
-                if subtitle_inputs:
-                    # overlay 가동 시 포맷 지정으로 안정성 향상
-                    filter_parts.append(f"[2:v]format=yuva420p,fps={FPS},setsar=1:1[v_sub]")
-                    filter_parts.append(f"{final_v_label}[v_sub]overlay=format=yuv420[v_final]")
-                    final_v_label = "[v_final]"
+                cmd = [ffmpeg_exe, "-y"]
+                if is_vid:
+                    # [영상] 좌우 줌 없이 그대로 재생 (사용자 요청 반영)
+                    cmd.extend(["-stream_loop", "-1", "-i", src])
+                    vf = f"scale={VW}:{VH}:force_original_aspect_ratio=decrease,pad={VW}:{VH}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p"
+                else:
+                    # [이미지] web_toon_manager 스타일 줌팬 적용
+                    cmd.extend(["-loop", "1", "-i", src])
+                    z_speed, p_speed = 0.00015, 0.2
+                    effect_idx = random.randint(0, 2)
+                    if effect_idx == 0:
+                        z_expr, x_expr, y_expr = f"zoom+{z_speed}", "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"
+                    elif effect_idx == 1:
+                        z_expr, x_expr, y_expr = "1.1", f"min(on*{p_speed}, iw-iw/zoom)", "ih/2-(ih/zoom/2)"
+                    else:
+                        z_expr, x_expr, y_expr = "1.1", f"max((iw-iw/zoom)-(on*{p_speed}), 0)", "ih/2-(ih/zoom/2)"
+                    
+                    FPS_INTERNAL = 60
+                    vf = (
+                        f"scale={UW}:{UH}:force_original_aspect_ratio=increase,crop={UW}:{UH},format=yuv444p,"
+                        f"zoompan=z='{z_expr}':x='trunc({x_expr})':y='trunc({y_expr})':d={int(dur*FPS_INTERNAL)}:s={UW}x{UH}:fps={FPS_INTERNAL},"
+                        f"scale={VW}:{VH}:flags=lanczos,format=yuv420p,fps={FPS_OUT}"
+                    )
                 
-                filter_parts.append(f"[1:a]volume=1.0,atrim=duration={duration},aresample=48000:async=1[a_out]")
-                filter_complex = ";".join(filter_parts)
-                
-                # [NEW] filter_complex script path (Fix WinError 206)
-                filter_script_p = os.path.join(self.temp_sub_dir, f"filter_{base_name}.txt")
-                with open(filter_script_p, "w", encoding='utf-8') as f:
-                    f.write(filter_complex)
-                temp_files.append(filter_script_p)
-
-                cmd.extend(["-filter_complex_script", filter_script_p])
-                cmd.extend(["-map", final_v_label, "-map", "[a_out]"])
-                
-                # Encoding Options (Memory & Stability Optimized)
-                cmd.extend(["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p"])
-                cmd.extend(["-max_muxing_queue_size", "1024", "-threads", "0"]) # 큐 사이즈 확장으로 버퍼 오류 방지
-                cmd.extend(["-fps_mode", "cfr"])
-                cmd.extend(["-c:a", "aac", "-b:a", "192k"])
-                cmd.append(out_path)
+                cmd.extend([
+                    "-t", str(dur),
+                    "-vf", vf,
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-r", str(FPS_OUT),
+                    "-an", ts_path
+                ])
                 
                 creation_flags = 0x08000000 if os.name == 'nt' else 0
-                self.log_signal.emit(f"   🚀 인코딩 중... (Video Composite 스타일 자막 적용)")
-                
-                res = subprocess.run(
-                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    check=False, creationflags=creation_flags, cwd=self.target_dir
-                )
-                
-                if res.returncode != 0:
-                    err_msg = res.stderr.decode('utf-8', errors='ignore')
-                    # Show last 1000 chars to skip header and see actual error
-                    display_err = err_msg[-1000:] if len(err_msg) > 1000 else err_msg
-                    self.log_signal.emit(f"   ❌ FFmpeg 오류: {display_err}")
-                else:
-                    self.log_signal.emit(f"   ✅ 완료: {base_name}.mp4")
-                    count += 1
-                
-                # Cleanup sub PNGs
-                for tmp in temp_files:
-                    try: os.remove(tmp)
-                    except: pass
+                subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, creationflags=creation_flags)
+                ts_list.append(ts_path)
+                self.log_signal.emit(f"  ∟ 조각 생성: {os.path.basename(src)} ({dur:.2f}초)")
+
+            # 7. 최종 합성 (비디오 조각 + 오디오 + 자막 필터)
+            concat_list_p = os.path.join(self.temp_sub_dir, "concat.txt")
+            with open(concat_list_p, "w", encoding='utf-8') as f:
+                for ts in ts_list:
+                    f.write(f"file '{ts.replace('\\', '/')}'\n")
+
+            self.log_signal.emit("🎬 최종 인코딩 및 자막 필터 합성 중...")
             
-            # Cleanup Temp Dir
-            if os.path.exists(self.temp_sub_dir):
-                try:
-                    shutil.rmtree(self.temp_sub_dir)
-                    self.log_signal.emit("   🧹 임시 파일 삭제 완료")
-                except Exception as e:
-                    self.log_signal.emit(f"   ⚠️ 임시 폴더 삭제 실패: {e}")
- 
+            # 자막 필터 설정을 위한 윈도우 경로 및 스타일 처리
+            safe_srt_path = srt_path.replace("\\", "/").replace(":", "\\:")
+            f_family = self.style.get('font_family', 'Malgun Gothic')
+            f_size = self.style.get('font_size', 70)
+            f_folder = self.style.get('font_folder', '').replace("\\", "/").replace(":", "\\:")
+            
+            # CSS 컬러(명칭/Hex) -> ASS 컬러(&HBBGGRR) 변환 함수
+            def to_ass_color(c):
+                if not c: return "&HFFFFFF"
+                # 기본 색상 명칭 대응
+                named_colors = {
+                    'white': '#FFFFFF', 'black': '#000000', 'red': '#0000FF', 
+                    'green': '#00FF00', 'blue': '#FF0000', 'yellow': '#00FFFF',
+                    'Transparent': '#FFFFFF' # 투명은 기본 흰색으로 (ASS에서 별도 처리 가능하나 일단 기본값)
+                }
+                if c in named_colors: c = named_colors[c]
+                
+                if c.startswith('#'):
+                    rgb = c.lstrip('#')
+                    if len(rgb) == 6:
+                        return f"&H{rgb[4:6]}{rgb[2:4]}{rgb[0:2]}"
+                return "&HFFFFFF"
+
+            p_color = to_ass_color(self.style.get('text_color', '#FFFFFF'))
+            o_color = to_ass_color(self.style.get('outline_color', '#000000'))
+            
+            # FFmpeg subtitles 필터는 기본 스크립트 해상도가 288이므로 1080p 기준으로 스케일링 필요
+            # UI에서 70은 1080p에서의 70px을 의미함.
+            f_size_v = int(f_size * (288 / 1080))
+            if f_size_v < 1: f_size_v = 1
+            
+            # 테두리 두께 및 여백도 스케일링
+            # MarginV를 25에서 65로 변경 (자막 위치를 위로 올림)
+            # 테두리 두께를 2 올림 (2 -> 4)
+            outline_val = (4 if self.style.get('use_outline', True) else 0) * (288 / 1080)
+            margin_v = 65 * (288 / 1080)
+
+            # 자막 배경 및 스타일 설정
+            use_bg = self.style.get('use_bg', False)
+            bg_color_css = self.style.get('bg_color', 'Transparent')
+            bg_opacity = self.style.get('bg_opacity', 200) # 기본 투명도
+            
+            # ASS 색상 형식: &HAABBGGRR (AA는 투명도, 00이 불투명, FF가 투명)
+            ass_alpha = 255 - int(bg_opacity)
+            if ass_alpha < 0: ass_alpha = 0
+            if ass_alpha > 255: ass_alpha = 255
+            
+            b_color_base = to_ass_color(bg_color_css).replace("&H", "")
+            b_color = f"&H{ass_alpha:02X}{b_color_base}"
+            
+            # BorderStyle: 1(테두리), 3(불투명 배경 박스)
+            border_style = 3 if use_bg else 1
+            
+            force_style = (
+                f"FontName={f_family},FontSize={f_size_v},"
+                f"PrimaryColour={p_color},OutlineColour={o_color},"
+                f"BackColour={b_color},BorderStyle={border_style},"
+                f"Outline={outline_val:.1f},Shadow=0,Alignment=2,MarginV={margin_v:.1f},Bold=1"
+            )
+            
+            # fontsdir 적용 (사용자 정의 폰트 폴더 인식)
+            sub_filter = f"subtitles='{safe_srt_path}'"
+            if f_folder:
+                sub_filter += f":fontsdir='{f_folder}'"
+            sub_filter += f":force_style='{force_style}'"
+
+            cmd_final = [
+                ffmpeg_exe, "-y",
+                "-f", "concat", "-safe", "0", "-i", concat_list_p,
+                "-i", mp3_path,
+                "-filter_complex", sub_filter,
+                "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+                "-c:a", "aac", "-b:a", "192k", "-shortest",
+                out_path
+            ]
+            
+            subprocess.run(cmd_final, check=True, creationflags=creation_flags)
+
             elapsed = time.time() - start_time
-            self.finished.emit(f"작업 완료: 총 {count}개 영상 생성", elapsed)
- 
+            self.finished.emit(f"✅ 영상 제작 완료! (파일명: final_video.mp4)", elapsed)
+
         except Exception as e:
-            self.error.emit(f"치명적 오류: {e}")
-            import traceback
-            traceback.print_exc()
+            self.error.emit(f"❌ 오류 발생: {str(e)}")
         finally:
-            # Ensure cleanup even on error
             if os.path.exists(self.temp_sub_dir):
                 try: shutil.rmtree(self.temp_sub_dir)
                 except: pass
- 
-    def create_text_image(self, text, size):
-        # 폰트 이미지 캐싱
-        if not hasattr(self, '_text_cache'): self._text_cache = {}
-        cache_key = f"{text}_{size}_{self.style['font_family']}_{self.style['font_size']}_{self.style['text_color']}_{self.style['outline_color']}_{self.style['bg_color']}"
-        if cache_key in self._text_cache:
-            return self._text_cache[cache_key]
 
-        width, height = size
-        image = QImage(width, height, QImage.Format_RGBA8888)
-        image.fill(Qt.transparent)
-        
-        painter = QPainter(image)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setRenderHint(QPainter.TextAntialiasing)
-        
-        font_family = self.style['font_family']
-        base_font_size = self.style['font_size']
-        
-        min_dim = min(width, height)
-        scale_factor = min_dim / 1024.0
-        scaled_font_size = int(base_font_size * scale_factor)
-        
-        font = QFont(font_family)
-        font.setPixelSize(scaled_font_size)
-        
-        if not any(kw in font_family.lower() for kw in ['bold', 'heavy', 'black', 'eb', 'b']):
-            font.setBold(True)
-        else:
-            font.setBold(False)
-            
-        painter.setFont(font)
-        
-        margin_lr = int(40 * scale_factor)
-        max_rect = QRect(margin_lr, 0, width - (margin_lr * 2), height) 
-        text_rect = painter.boundingRect(max_rect, Qt.AlignCenter | Qt.TextWordWrap, text)
-        
-        margin_bottom = int(height * 0.05)
-        padding_h = int(40 * scale_factor)
-        padding_v = int(12 * scale_factor)
-        bg_rect = text_rect.adjusted(-padding_h, -padding_v, padding_h, padding_v)
-        
-        box_h = bg_rect.height()
-        target_bottom = height - margin_bottom
-        target_top = target_bottom - box_h
-        
-        dy = target_top - bg_rect.top()
-        bg_rect.translate(0, dy)
-        text_rect.translate(0, dy)
-
-        if self.style.get('use_bg', True) and self.style['bg_color'] != "Transparent":
-            color = QColor(self.style['bg_color'])
-            opacity = self.style.get('bg_opacity', 255)
-            color.setAlpha(opacity)
-            painter.setBrush(QBrush(color))
-            painter.setPen(Qt.NoPen)
-            radius = int(15 * scale_factor)
-            painter.drawRoundedRect(bg_rect, radius, radius)
-
-        text_draw_area = bg_rect.translated(0, 6)
-        
-        if self.style.get('use_outline', True) and self.style['outline_color'] and self.style['outline_color'].lower() != "none":
-            painter.setPen(QColor(self.style['outline_color']))
-            outline_width = int(6 * scale_factor)
-            if outline_width < 2: outline_width = 2
-            steps = 24 
-            import math
-            for i in range(steps):
-                angle = 2 * math.pi * i / steps
-                dx = int(round(outline_width * math.cos(angle)))
-                dy = int(round(outline_width * math.sin(angle)))
-                painter.drawText(text_draw_area.translated(dx, dy), Qt.AlignCenter | Qt.TextWordWrap, text)
-            
-            if outline_width > 3:
-                inner_width = outline_width / 2.0
-                for i in range(steps):
-                    angle = 2 * math.pi * i / steps
-                    dx = int(round(inner_width * math.cos(angle)))
-                    dy = int(round(inner_width * math.sin(angle)))
-                    painter.drawText(text_draw_area.translated(dx, dy), Qt.AlignCenter | Qt.TextWordWrap, text)
-
-        painter.setPen(QColor(self.style['text_color']))
-        painter.drawText(text_draw_area, Qt.AlignCenter | Qt.TextWordWrap, text)
-        painter.end()
-        
-        ptr = image.bits()
-        ptr.setsize(image.byteCount())
-        import numpy as np
-        arr = np.frombuffer(ptr, np.uint8).copy().reshape((height, width, 4))
-        
-        if len(self._text_cache) > 50:
-            self._text_cache.clear()
-        self._text_cache[cache_key] = arr
-        return arr
-
-    def get_audio_duration(self, ffmpeg_exe, mp3_path):
-        # Use ffprobe logic or simple ffmpeg -i call parsing
-        cmd = [ffmpeg_exe, "-i", mp3_path]
-        try:
-            r = subprocess.run(cmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
-            # Duration: 00:00:10.50,
-            out = r.stderr.decode('utf-8')
-            import re
-            m = re.search(r"Duration: (\d+):(\d+):(\d+\.\d+)", out)
-            if m:
-                h, m, s = float(m.group(1)), float(m.group(2)), float(m.group(3))
-                return h*3600 + m*60 + s
-        except:
-            pass
-        return 0.0
-
-    def fix_concat_file(self, path):
-        # Read lines, ensure single quotes frame properties, replace backslash with forward slash
-        print("DEBUG: Executing clean fix_concat_file")
-        lines = []
-        with open(path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-        
-        with open(path, 'w', encoding='utf-8') as f:
-            for line in lines:
-                if line.startswith('file'):
-                    # format: file 'path'
-                    parts = line.split("'", 2)
-                    if len(parts) >= 2:
-                        raw_path = parts[1]
-                        fixed_path = raw_path.replace('\\', '/')
-                        f.write(f"file '{fixed_path}'\n")
-                    else:
-                        f.write(line)
-                else:
-                    f.write(line)
-
-
-
-    def parse_srt(self, srt_path):
+    def parse_srt_robust(self, path):
+        import re
         segments = []
         try:
-            with open(srt_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-        except UnicodeDecodeError:
-            with open(srt_path, 'r', encoding='cp949') as f:
-                content = f.read()
-            
-        blocks = content.strip().split('\n\n')
-        for block in blocks:
-            lines = block.strip().split('\n')
-            if len(lines) >= 3:
-                try:
-                    idx = int(lines[0].strip())
-                    time_line = lines[1].strip()
-                    text = " ".join(lines[2:])
-                    
-                    if '-->' in time_line:
-                        s_str, e_str = time_line.split('-->')
-                        start = self.parse_time(s_str.strip())
-                        end = self.parse_time(e_str.strip())
-                        
-                        segments.append({
-                            'index': idx,
-                            'start': start,
-                            'end': end,
-                            'text': text
-                        })
-                except:
-                    pass
-        return segments
-
-    def parse_time(self, t_str):
-        # HH:MM:SS,mmm
-        t_str = t_str.replace(',', '.')
-        parts = t_str.split(':')
+            with open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
+        except:
+            with open(path, 'r', encoding='cp949', errors='ignore') as f: content = f.read()
+        content = content.replace('\r\n', '\n').strip()
+        # 사용가 제공한 정밀 정규식 적용 (구조 누락 방지)
+        pattern = re.compile(r"(\d+)\s+(\d{2}:\d{2}:\d{2}[.,]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[.,]\d{3})\s*(.*?)(?=\n\d+\s+\d{2}:\d{2}:\d{2}[.,]\d{3}|\Z)", re.DOTALL)
         
-        if len(parts) == 3:
-            h = float(parts[0])
-            m = float(parts[1])
-            s = float(parts[2])
-            return h*3600 + m*60 + s
+        matches = pattern.finditer(content)
+        for m in matches:
+            segments.append({
+                'index': int(m.group(1)),
+                'start': self.parse_time(m.group(2)),
+                'end': self.parse_time(m.group(3)),
+                'text': m.group(4).strip()
+            })
+        return sorted(segments, key=lambda x: x['start'])
+
+    def parse_time(self, t):
+        t = t.replace(',', '.').replace(' ', '')
+        p = t.split(':')
+        if len(p) == 3:
+            return float(p[0])*3600 + float(p[1])*60 + float(p[2])
         return 0.0
+
+    def get_audio_duration(self, exe, p):
+        r = subprocess.run([exe, "-i", p], stderr=subprocess.PIPE, stdout=subprocess.PIPE, creationflags=0x08000000)
+        m = re.search(r"Duration: (\d+):(\d+):(\d+\.\d+)", r.stderr.decode('utf-8', errors='ignore'))
+        return float(m.group(1))*3600 + float(m.group(2))*60 + float(m.group(3)) if m else 0.0
 
 
 
