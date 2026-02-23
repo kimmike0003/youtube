@@ -216,10 +216,10 @@ class MainApp(QWidget):
         self.initTabShorts()
         self.tabs.addTab(self.tab_shorts, "금은숏츠")
 
-        # 9. 대본리스트
+        # 9. 경제대본
         self.tab_video_list = QWidget()
         self.initTabVideoList()
-        self.tabs.addTab(self.tab_video_list, "대본리스트")
+        self.tabs.addTab(self.tab_video_list, "경제대본")
 
         # 10. 대본 자르기
         self.tab_script_split = QWidget()
@@ -236,10 +236,7 @@ class MainApp(QWidget):
         self.initTabAudioTranscribe()
         self.tabs.addTab(self.tab_transcribe, "Audio Transcribe")
 
-        # 13. YouTube 분석
-        self.tab7 = QWidget()
-        self.initTab7()
-        self.tabs.addTab(self.tab7, "YouTube 분석")
+
 
         # 14. 소설대본
         self.tab_novel_script = QWidget()
@@ -255,6 +252,11 @@ class MainApp(QWidget):
         self.tab_novel_thumbnail = QWidget()
         self.initTabNovelThumbnail()
         self.tabs.addTab(self.tab_novel_thumbnail, "소설 썸네일")
+
+        # 17. YouTube 분석
+        self.tab7 = QWidget()
+        self.initTab7()
+        self.tabs.addTab(self.tab7, "YouTube 분석")
 
         # ========== Hidden 처리된 탭들 (초기화는 하되 addTab은 하지 않음) ==========
         
