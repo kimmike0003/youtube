@@ -539,7 +539,7 @@ class MainApp(QWidget):
         
         # Merge JSON/MP3 Checkbox
         self.chk_merge_mp3_json = QCheckBox("다운로드 후 merge.json, merge.mp3 만들기")
-        self.chk_merge_mp3_json.setChecked(False)
+        self.chk_merge_mp3_json.setChecked(True)
         form_layout.addRow("", self.chk_merge_mp3_json)
 
         settings_group.setLayout(form_layout)
