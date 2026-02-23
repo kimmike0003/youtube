@@ -283,7 +283,8 @@ class VideoMergerWorker(QThread):
                 
                 # 랜덤 효과 설정 생성
                 item_effect = None
-                if self.use_random_effects:
+                # [Request] "1" (1.jpg/1.mp3) 번은 항상 효과 금지
+                if self.use_random_effects and base_name != "1":
                     import random
                     # 효과: 1(Zoom In), 2(Pan L-R), 3(Pan R-L)
                     # Zoom Out 은 Zoom In 과 반대인데, start/end를 뒤집으면 됨.
@@ -634,6 +635,10 @@ class VideoMergerWorker(QThread):
             # Effect Config 확인
             effect_config = task_effect_config if task_effect_config else getattr(self, 'effect_config', None)
             effect_type = effect_config.get('type', 0) if effect_config else 0
+            
+            # [Request] "1"번 영상은 어떤 경우에도 효과 금지 (Zoom/Pan 방지)
+            if base_name == "1":
+                effect_type = 0
             
             if effect_config:
                 self.log_signal.emit(f"   🚀 [Ultra-Smooth] Applying 8K Supersampling Effect: {effect_type}")
