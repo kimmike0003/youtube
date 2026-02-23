@@ -5115,10 +5115,10 @@ class MainApp(QWidget):
         # Default Settings per line (Size, Y-Pos, ColorHex)
         defaults = [
             (130, 15, "#FFFFFF"), # Line 1: White, Size 130, Y 15
-            (50, 69, "#FFFF00"),  # Line 2: Yellow, Size 50, Y 69
+            (60, 69, "#FFFF00"),  # Line 2: Yellow, Size 60, Y 69
             (120, 84, "#FF0000")  # Line 3: Red, Size 120, Y 84
         ]
-        
+
         for i in range(3):
             group = QGroupBox(f"줄 {i+1}")
             g_layout = QHBoxLayout()
