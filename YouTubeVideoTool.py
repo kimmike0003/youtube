@@ -645,10 +645,15 @@ class MainApp(QWidget):
         self.chk_use_sub.setChecked(True)
         style_layout.addWidget(self.chk_use_sub, 0, 0)
         
-        # 랜덤 효과 체크박스 추가
+        # 랜덤 효과 체크박스 및 1번 고정 체크박스
+        h_eff_layout = QHBoxLayout()
         self.chk_random_effect = QCheckBox("랜덤 화면 효과 (Zoom/Pan 1.0->1.1)")
         self.chk_random_effect.setChecked(False)
-        style_layout.addWidget(self.chk_random_effect, 0, 1, 1, 3)
+        self.chk_fix_first_img = QCheckBox("1번 이미지 고정 (줌/팬 방지)")
+        self.chk_fix_first_img.setChecked(True)
+        h_eff_layout.addWidget(self.chk_random_effect)
+        h_eff_layout.addWidget(self.chk_fix_first_img)
+        style_layout.addLayout(h_eff_layout, 0, 1, 1, 3)
 
         # 1행: 폰트 폴더
         font_folder_label = QLabel("폰트 폴더:")
@@ -1126,7 +1131,8 @@ class MainApp(QWidget):
             style=style,
             volume=vol,
             trim_end=trim,
-            use_random_effects=use_random
+            use_random_effects=use_random,
+            fix_first_img=self.chk_fix_first_img.isChecked() # New Parameter
         )
         self.merger_worker.log_signal.connect(self.video_log.append)
         self.merger_worker.finished.connect(self.on_video_merge_finished)
@@ -2530,6 +2536,11 @@ class MainApp(QWidget):
         style_layout.addWidget(self.atv_slider_bg_opacity, 4, 1, 1, 2)
         style_layout.addWidget(self.atv_lbl_bg_opacity, 4, 3)
 
+        # 랜덤 효과 및 1번 이미지 고정 체크박스 추가
+        self.atv_chk_fix_first_img = QCheckBox("1번 이미지 고정 (줌/팬 방지)")
+        self.atv_chk_fix_first_img.setChecked(True)
+        style_layout.addWidget(self.atv_chk_fix_first_img, 5, 0, 1, 2)
+
         style_group.setLayout(style_layout)
         layout.addWidget(style_group)
         
@@ -2565,7 +2576,8 @@ class MainApp(QWidget):
             'bg_opacity': int(self.atv_slider_bg_opacity.value() * 2.55),
             'use_bg': self.atv_checkbox_use_bg.isChecked(),
             'use_outline': self.atv_checkbox_use_outline.isChecked(),
-            'font_folder': self.atv_font_folder_path.text().strip()
+            'font_folder': self.atv_font_folder_path.text().strip(),
+            'fix_first_img': self.atv_chk_fix_first_img.isChecked() # New Parameter
         }
         
         self.atv_log.append(f"🚀 작업 시작: {target_dir}")
@@ -6832,14 +6844,26 @@ class AudioToVideoWorker(QThread):
                     vf = f"scale={VW}:{VH}:force_original_aspect_ratio=decrease,pad={VW}:{VH}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p"
                 else:
                     cmd.extend(["-loop", "1", "-i", src])
-                    z_speed, p_speed = 0.00015, 0.2
-                    effect_idx = random.randint(0, 2)
-                    if effect_idx == 0:
-                        z_expr, x_expr, y_expr = f"zoom+{z_speed}", "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"
-                    elif effect_idx == 1:
-                        z_expr, x_expr, y_expr = "1.1", f"min(on*{p_speed}, iw-iw/zoom)", "ih/2-(ih/zoom/2)"
+                    # [Request] 1번 이미지 고정 체크 시 효과 제거
+                    is_first_img = False
+                    base_src = os.path.basename(src).lower()
+                    if base_src.startswith("1.") or base_src == "black_start.png":
+                        is_first_img = True
+                    
+                    do_fix = self.style.get('fix_first_img', True)
+                    
+                    if is_first_img and do_fix:
+                        # 고정 (No Animation)
+                        z_expr, x_expr, y_expr = "1", "0", "0"
                     else:
-                        z_expr, x_expr, y_expr = "1.1", f"max((iw-iw/zoom)-(on*{p_speed}), 0)", "ih/2-(ih/zoom/2)"
+                        z_speed, p_speed = 0.00015, 0.2
+                        effect_idx = random.randint(0, 2)
+                        if effect_idx == 0:
+                            z_expr, x_expr, y_expr = f"zoom+{z_speed}", "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"
+                        elif effect_idx == 1:
+                            z_expr, x_expr, y_expr = "1.1", f"min(on*{p_speed}, iw-iw/zoom)", "ih/2-(ih/zoom/2)"
+                        else:
+                            z_expr, x_expr, y_expr = "1.1", f"max((iw-iw/zoom)-(on*{p_speed}), 0)", "ih/2-(ih/zoom/2)"
                     
                     FPS_INTERNAL = 60
                     vf = (

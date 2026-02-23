@@ -200,7 +200,7 @@ class VideoMergerWorker(QThread):
     finished = pyqtSignal(str, float)
     error = pyqtSignal(str)
 
-    def __init__(self, image_dir, audio_dir, output_dir, subtitles=None, style=None, volume=1.0, trim_end=0.0, use_random_effects=False, is_shorts=False):
+    def __init__(self, image_dir, audio_dir, output_dir, subtitles=None, style=None, volume=1.0, trim_end=0.0, use_random_effects=False, is_shorts=False, fix_first_img=True):
         super().__init__()
         self.image_dir = image_dir
         self.audio_dir = audio_dir
@@ -211,6 +211,7 @@ class VideoMergerWorker(QThread):
         self.trim_end = trim_end
         self.use_random_effects = use_random_effects
         self.is_shorts = is_shorts
+        self.fix_first_img = fix_first_img # New Parameter
         self.target_size = (1080, 1920) if is_shorts else (1920, 1080)
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -283,9 +284,13 @@ class VideoMergerWorker(QThread):
                 
                 # 랜덤 효과 설정 생성
                 item_effect = None
-                # [Request] "1" (1.jpg/1.mp3) 번은 항상 효과 금지
-                if self.use_random_effects and base_name != "1":
-                    import random
+                # [Request] "1" (1.jpg/1.mp3) 번은 고정 체크 시 효과 금지
+                if self.use_random_effects:
+                    if self.fix_first_img and base_name == "1":
+                        # Skip effect for 1.jpg
+                        pass
+                    else:
+                        import random
                     # 효과: 1(Zoom In), 2(Pan L-R), 3(Pan R-L)
                     # Zoom Out 은 Zoom In 과 반대인데, start/end를 뒤집으면 됨.
                     # 하지만 현재 코드 상 Type 1은 start->end.
@@ -636,8 +641,8 @@ class VideoMergerWorker(QThread):
             effect_config = task_effect_config if task_effect_config else getattr(self, 'effect_config', None)
             effect_type = effect_config.get('type', 0) if effect_config else 0
             
-            # [Request] "1"번 영상은 어떤 경우에도 효과 금지 (Zoom/Pan 방지)
-            if base_name == "1":
+            # [Request] "1"번 영상은 고정 체크 시 효과 금지 (Zoom/Pan 방지)
+            if self.fix_first_img and base_name == "1":
                 effect_type = 0
             
             if effect_config:
@@ -1000,9 +1005,9 @@ class VideoMergerWorker(QThread):
         return arr
 
 class SingleVideoWorker(VideoMergerWorker):
-    def __init__(self, img_path, audio_path, output_path, subtitles=None, style=None, volume=1.0, trim_end=0.0, effect_config=None, is_shorts=False):
+    def __init__(self, img_path, audio_path, output_path, subtitles=None, style=None, volume=1.0, trim_end=0.0, effect_config=None, is_shorts=False, fix_first_img=True):
         super().__init__(os.path.dirname(img_path), os.path.dirname(audio_path), os.path.dirname(output_path), 
-                         subtitles=None, style=style, volume=volume, trim_end=trim_end, is_shorts=is_shorts)
+                         subtitles=None, style=style, volume=volume, trim_end=trim_end, is_shorts=is_shorts, fix_first_img=fix_first_img)
         self.single_img = img_path
         self.single_audio = audio_path
         self.single_output = output_path
@@ -1032,11 +1037,11 @@ class SingleVideoWorker(VideoMergerWorker):
             self.error.emit(f"❌ 오류 발생: {e}")
 
 class VideoDubbingWorker(VideoMergerWorker):
-    def __init__(self, video_path, audio_path, output_path, subtitles=None, style=None, volume=1.0):
+    def __init__(self, video_path, audio_path, output_path, subtitles=None, style=None, volume=1.0, fix_first_img=True):
         super().__init__(os.path.dirname(video_path) if video_path else "", 
                          os.path.dirname(audio_path) if audio_path else "", 
                          os.path.dirname(output_path) if output_path else "", 
-                         subtitles=None, style=style, volume=volume)
+                         subtitles=None, style=style, volume=volume, fix_first_img=fix_first_img)
         self.video_path = video_path
         self.audio_path = audio_path
         self.output_path = output_path
