@@ -365,10 +365,24 @@ class VideoMergerWorker(QThread):
         
         try:
             # 0. FFmpeg 바이너리 확보
-            try:
-                import imageio_ffmpeg
-                ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-            except ImportError:
+            ffmpeg_exe = None
+            
+            # (1) 프로젝트 폴더 내 ffmpeg_bin 확인
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            local_ffmpeg = os.path.join(base_dir, "ffmpeg_bin", "ffmpeg.exe")
+            if os.path.exists(local_ffmpeg):
+                ffmpeg_exe = local_ffmpeg
+            
+            # (2) imageio_ffmpeg 확인
+            if not ffmpeg_exe:
+                try:
+                    import imageio_ffmpeg
+                    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+                except ImportError:
+                    pass
+            
+            # (3) 시스템 환경변수 확인
+            if not ffmpeg_exe:
                 ffmpeg_exe = "ffmpeg"
 
             # 1. 오디오 정보 확인 (MoviePy로 메타데이터만 빠르게 읽기)
@@ -706,9 +720,10 @@ class VideoMergerWorker(QThread):
 
             elif img_path and os.path.exists(img_path) and img_path != "MULTI_IMAGE_MODE":
                 # Effect Config (Zoom/Pan)
-                # [Anti-Jitter] 8K(7680x4320) Ultra-Supersampling
-                # [Speed Optimize] 8K -> 4K (Still ultra-smooth for 1080p, but 4x faster)
-                SUPER_W, SUPER_H = 3840, 2160
+                # [Anti-Jitter] Ultra-Supersampling
+                # [Speed Optimize] CPU 위주 환경에 맞춰 해상도와 프리셋 최적화
+                # - GPU가 없을 때를 대비해 내부 해상도를 2240(1.16x)으로 최적화 (FHD+ 품질)
+                SUPER_W, SUPER_H = 2240, 1260
                 filter_parts.append(f"[0:v]scale={SUPER_W}:{SUPER_H}:flags=bicubic,setsar=1:1,fps={FPS}[v_high]")
                 
                 # Zoom/Pan Expression
@@ -770,9 +785,37 @@ class VideoMergerWorker(QThread):
             command.extend(["-filter_complex_script", filter_script_path])
             command.extend(["-map", final_v_label, "-map", "[a_out]"])
             
-            # Encoding Options
-            command.extend(["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p"])
+            # [Optimization] Encoder Selection & Hardware Acceleration
+            # - NVENC (NVIDIA), QSV (Intel) 자동 감지
+            # - CRF/CQ 설정으로 용량 최적화
+            v_encoder = "libx264"
+            enc_options = ["-preset", "superfast", "-crf", "30"] # Default CPU Encoder
+            
+            # 한 번만 확인하기 위해 cache 활용 (있다면)
+            if not hasattr(VideoMergerWorker, "_best_encoder"):
+                VideoMergerWorker._best_encoder = "libx264"
+                try:
+                    probe_cmd = [ffmpeg_exe, "-encoders"]
+                    p_res = subprocess.run(probe_cmd, capture_output=True, text=True, creationflags=creation_flags)
+                    if "h264_nvenc" in p_res.stdout:
+                        VideoMergerWorker._best_encoder = "h264_nvenc"
+                    elif "h264_qsv" in p_res.stdout:
+                        VideoMergerWorker._best_encoder = "h264_qsv"
+                except:
+                    pass
+            
+            v_encoder = VideoMergerWorker._best_encoder
+            if v_encoder == "h264_nvenc":
+                enc_options = ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "28", "-b:v", "0"]
+            elif v_encoder == "h264_qsv":
+                enc_options = ["-c:v", "h264_qsv", "-preset", "superfast", "-global_quality", "26"]
+            else:
+                enc_options = ["-c:v", "libx264", "-preset", "superfast", "-crf", "30"]
+
+            command.extend(enc_options)
+            command.extend(["-pix_fmt", "yuv420p"])
             command.extend(["-c:a", "aac", "-b:a", "192k"])
+            
             # Strictly limit output duration to audio length
             command.extend(["-t", f"{final_duration:.6f}"])
             command.extend(["-y", output_path])
@@ -1095,15 +1138,19 @@ class VideoDubbingWorker(VideoMergerWorker):
             self.log_signal.emit(f"🎬 동영상 더빙 작업 시작: {os.path.basename(self.video_path)}...")
             self.log_signal.emit(f"   오디오: {os.path.basename(self.audio_path)}")
             
-            # [Fix] Unique Temp Dir
-            temp_dir = os.path.join(os.path.dirname(self.output_path), f"temp_dub_{int(time.time())}_{os.getpid()}")
-            os.makedirs(temp_dir, exist_ok=True)
+            # 0. FFmpeg 바이너리 확보
+            ffmpeg_exe = None
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            local_ffmpeg = os.path.join(base_dir, "ffmpeg_bin", "ffmpeg.exe")
+            if os.path.exists(local_ffmpeg):
+                ffmpeg_exe = local_ffmpeg
             
-            try:
-                import imageio_ffmpeg
-                ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-            except ImportError:
-                ffmpeg_exe = "ffmpeg"
+            if not ffmpeg_exe:
+                try:
+                    import imageio_ffmpeg
+                    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+                except ImportError:
+                    ffmpeg_exe = "ffmpeg"
             
             if not os.path.exists(self.audio_path):
                 self.error.emit(f"❌ 오디오 파일 없음: {self.audio_path}")
@@ -1288,8 +1335,32 @@ class VideoDubbingWorker(VideoMergerWorker):
             
             command.extend(["-t", f"{audio_duration:.3f}"])
             
-            command.extend(["-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p"])
+            # [Optimization] Encoder Selection & Hardware Acceleration
+            creation_flags = 0x08000000 if os.name == 'nt' else 0
+            if not hasattr(VideoMergerWorker, "_best_encoder"):
+                VideoMergerWorker._best_encoder = "libx264"
+                try:
+                    probe_cmd = [ffmpeg_exe, "-encoders"]
+                    p_res = subprocess.run(probe_cmd, capture_output=True, text=True, creationflags=creation_flags)
+                    if "h264_nvenc" in p_res.stdout:
+                        VideoMergerWorker._best_encoder = "h264_nvenc"
+                    elif "h264_qsv" in p_res.stdout:
+                        VideoMergerWorker._best_encoder = "h264_qsv"
+                except:
+                    pass
+            
+            v_encoder = VideoMergerWorker._best_encoder
+            if v_encoder == "h264_nvenc":
+                enc_options = ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "28", "-b:v", "0"]
+            elif v_encoder == "h264_qsv":
+                enc_options = ["-c:v", "h264_qsv", "-preset", "superfast", "-global_quality", "26"]
+            else:
+                enc_options = ["-c:v", "libx264", "-preset", "superfast", "-crf", "30"]
+
+            command.extend(enc_options)
+            command.extend(["-pix_fmt", "yuv420p"])
             command.extend(["-c:a", "aac", "-b:a", "192k"])
+            
             temp_output = self.output_path + f".temp_{int(time.time())}.mp4"
             command.extend([temp_output])
             
@@ -1521,7 +1592,7 @@ class VideoConcatenatorWorker(QThread):
             command.extend(["-map", final_v_label, "-map", "[out_a]"])
             
             # Encoding options
-            command.extend(["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p"])
+            command.extend(["-c:v", "libx264", "-preset", "superfast", "-pix_fmt", "yuv420p"])
             command.extend(["-c:a", "aac", "-b:a", "192k"])
             
             command.extend(["-y", self.output_file])
@@ -1770,7 +1841,7 @@ class GoldShortsWorker(QThread):
                     
                     # 오디오 길이에 맞춤 (가장 짧은 스트림=오디오 기준 종료)
                     cmd.extend(["-shortest"])
-                    cmd.extend(["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p"])
+                    cmd.extend(["-c:v", "libx264", "-preset", "superfast", "-pix_fmt", "yuv420p"])
                     cmd.extend(["-c:a", "aac", "-b:a", "192k"])
                     cmd.append(output_path)
                     

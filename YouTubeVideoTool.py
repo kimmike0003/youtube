@@ -1401,6 +1401,19 @@ class MainApp(QWidget):
             if callback:
                 callback()
 
+    def browse_atv_folder(self):
+        path = QFileDialog.getExistingDirectory(self, "작업 폴더 선택")
+        if path:
+            self.atv_dir.setText(path)
+            # 폴더 선택 시 결과 파일명을 기본값으로 채워줌
+            default_out = os.path.join(path, "final_video.mp4")
+            self.atv_out_path.setText(default_out)
+
+    def browse_save_file(self, line_edit, filter_str):
+        path, _ = QFileDialog.getSaveFileName(self, "파일 저장 위치 지정", line_edit.text() or "", filter_str)
+        if path:
+            line_edit.setText(path)
+
     def load_custom_fonts(self):
         font_dir = self.font_folder_path.text().strip()
         
@@ -2454,10 +2467,22 @@ class MainApp(QWidget):
         dir_layout = QGridLayout()
         self.atv_dir = QLineEdit()
         btn_dir = QPushButton("작업 폴더 선택")
-        btn_dir.clicked.connect(lambda: self.browse_folder(self.atv_dir))
+        btn_dir.clicked.connect(self.browse_atv_folder)
+        
         dir_layout.addWidget(QLabel("작업 폴더:"), 0, 0)
         dir_layout.addWidget(self.atv_dir, 0, 1)
         dir_layout.addWidget(btn_dir, 0, 2)
+        
+        # [Request] 결과 파일 경로 지정 추가
+        self.atv_out_path = QLineEdit()
+        self.atv_out_path.setPlaceholderText("결과 영상이 저장될 경로와 파일명")
+        btn_out = QPushButton("결과 파일 지정")
+        btn_out.clicked.connect(lambda: self.browse_save_file(self.atv_out_path, "Video Files (*.mp4)"))
+        
+        dir_layout.addWidget(QLabel("결과 파일:"), 1, 0)
+        dir_layout.addWidget(self.atv_out_path, 1, 1)
+        dir_layout.addWidget(btn_out, 1, 2)
+        
         dir_group.setLayout(dir_layout)
         layout.addWidget(dir_group)
 
@@ -2583,7 +2608,11 @@ class MainApp(QWidget):
         self.atv_log.append(f"🚀 작업 시작: {target_dir}")
         self.btn_atv_start.setEnabled(False)
         
-        self.atv_worker = AudioToVideoWorker(target_dir, style)
+        out_path = self.atv_out_path.text().strip()
+        if not out_path:
+            out_path = os.path.join(target_dir, "final_video.mp4")
+            
+        self.atv_worker = AudioToVideoWorker(target_dir, style, out_path)
         self.atv_worker.log_signal.connect(self.atv_log.append)
         self.atv_worker.finished.connect(self.on_atv_finished)
         self.atv_worker.error.connect(self.on_atv_error)
@@ -6819,10 +6848,11 @@ class AudioToVideoWorker(QThread):
     finished = pyqtSignal(str, float)
     error = pyqtSignal(str)
     
-    def __init__(self, target_dir, style):
+    def __init__(self, target_dir, style, output_path):
         super().__init__()
         self.target_dir = target_dir
         self.style = style # Dictionary of style settings
+        self.output_path = output_path
         self.temp_sub_dir = os.path.join(self.target_dir, "temp_subs")
 
     def run(self):
@@ -6853,7 +6883,7 @@ class AudioToVideoWorker(QThread):
             mp3_path = os.path.join(self.target_dir, mp3_files[0])
             srt_path = os.path.join(self.target_dir, srt_files[0])
             base_name = os.path.splitext(mp3_files[0])[0]
-            out_path = os.path.join(self.target_dir, "final_video.mp4")
+            out_path = self.output_path
 
             self.log_signal.emit(f"🚀 작업 시작: {mp3_files[0]} + {srt_files[0]}")
 
@@ -6914,7 +6944,8 @@ class AudioToVideoWorker(QThread):
             from concurrent.futures import ThreadPoolExecutor
             ts_list = [None] * len(checkpoints)
             FPS_OUT = 30
-            UW, UH = 2560, 1440 # 줌용 고해상도
+            # [Optimization] CPU 환경에 맞춰 해상도 최적화 (2560 -> 2240)
+            UW, UH = 2240, 1260 # 줌용 해상도
             VW, VH = 1920, 1080 # 최종 출력
             
             # GPU 가속은 사용하지 않음 (사용자 요청)
@@ -7066,16 +7097,16 @@ class AudioToVideoWorker(QThread):
                 sub_filter += f":fontsdir='{f_folder}'"
             sub_filter += f":force_style='{force_style}'"
 
-            # 최종 인코더 및 프리셋 설정 (CPU 전용)
+            # 최종 인코더 및 프리셋 설정 (CPU 전용 최적화)
             v_codec_final = "libx264"
-            final_preset = "fast" 
+            final_preset = "superfast" 
             
             cmd_final = [
                 ffmpeg_exe, "-y",
                 "-f", "concat", "-safe", "0", "-i", concat_list_p,
                 "-i", mp3_path,
                 "-filter_complex", sub_filter,
-                "-c:v", v_codec_final, "-preset", final_preset, "-crf", "20",
+                "-c:v", v_codec_final, "-preset", final_preset, "-crf", "30",
                 "-c:a", "aac", "-b:a", "192k", "-shortest",
                 out_path
             ]
@@ -7083,7 +7114,7 @@ class AudioToVideoWorker(QThread):
             subprocess.run(cmd_final, check=True, creationflags=creation_flags)
 
             elapsed = time.time() - start_time
-            self.finished.emit(f"✅ 영상 제작 완료! (파일명: final_video.mp4)", elapsed)
+            self.finished.emit(f"✅ 영상 제작 완료! (파일명: {os.path.basename(self.output_path)})", elapsed)
 
         except Exception as e:
             self.error.emit(f"❌ 오류 발생: {str(e)}")
