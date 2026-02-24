@@ -2875,6 +2875,41 @@ class MainApp(QWidget):
         tab_merge.setLayout(l_merge)
         sub_tabs.addTab(tab_merge, "4. Merge Audio/SRT")
         
+        # SubTab 5: Compress MP3
+        tab_compress = QWidget()
+        l_compress = QVBoxLayout()
+        
+        comp_in_group = QGroupBox("MP3 파일 선택 (용량 줄이기)")
+        comp_in_layout = QHBoxLayout()
+        self.at_comp_files = QLineEdit()
+        self.at_comp_files.setPlaceholderText("선택된 파일이 없습니다.")
+        btn_comp = QPushButton("파일 찾기")
+        btn_comp.clicked.connect(lambda: self.browse_files(self.at_comp_files, "Audio Files (*.mp3 *.wav *.m4a)"))
+        comp_in_layout.addWidget(self.at_comp_files)
+        comp_in_layout.addWidget(btn_comp)
+        comp_in_group.setLayout(comp_in_layout)
+        
+        l_compress.addWidget(comp_in_group)
+        
+        bitrate_layout = QHBoxLayout()
+        bitrate_layout.addWidget(QLabel("압축 비트레이트:"))
+        self.combo_bitrate = QComboBox()
+        self.combo_bitrate.addItems(["16k", "32k", "64k", "128k"])
+        self.combo_bitrate.setCurrentText("64k") # Whisper용으로 64k면 충분
+        bitrate_layout.addWidget(self.combo_bitrate)
+        bitrate_layout.addWidget(QLabel(" (비트레이트가 낮을수록 용량이 작아집니다.)"))
+        bitrate_layout.addStretch()
+        l_compress.addLayout(bitrate_layout)
+        
+        self.btn_at_compress = QPushButton("5. MP3 용량 줄이기 시작")
+        self.btn_at_compress.setStyleSheet("background-color: #4CAF50; color: white; padding: 10px; font-weight: bold;")
+        self.btn_at_compress.clicked.connect(lambda: self.start_audio_transcribe("compress"))
+        l_compress.addWidget(self.btn_at_compress)
+        l_compress.addStretch()
+        
+        tab_compress.setLayout(l_compress)
+        sub_tabs.addTab(tab_compress, "5. Compress MP3")
+        
         layout.addWidget(sub_tabs)
         
         # Log
@@ -2929,14 +2964,24 @@ class MainApp(QWidget):
                  return
             target_files = [f.strip() for f in raw_text.split(";") if f.strip()]
             
+        elif mode == "compress":
+            raw_text = self.at_comp_files.text().strip()
+            if not raw_text:
+                 QMessageBox.warning(self, "경고", "선택된 파일이 없습니다.")
+                 return
+            target_files = [f.strip() for f in raw_text.split(";") if f.strip()]
+            
         if not target_files:
             QMessageBox.warning(self, "경고", "처리할 파일 목록이 없습니다.")
             return
 
         model_name = self.combo_whisper_model.currentText()
+        if mode == "compress":
+            model_name = self.combo_bitrate.currentText() # 비트레이트를 model_name 대신 전달
+            
         merge_mp3 = self.chk_merge_mp3.isChecked() if mode == "convert" else False
         
-        self.at_log.append(f"🚀 작업 시작: {mode} (Model: {model_name}, Merge: {merge_mp3})")
+        self.at_log.append(f"🚀 작업 시작: {mode} (Model/Bitrate: {model_name}, Merge: {merge_mp3})")
         self.at_log.append(f"📂 대상: {len(target_files)}개 파일")
         
         # Disable buttons
@@ -2944,6 +2989,8 @@ class MainApp(QWidget):
         self.btn_at_transcribe.setEnabled(False)
         self.btn_at_all.setEnabled(False)
         self.btn_at_merge.setEnabled(False)
+        if hasattr(self, 'btn_at_compress'):
+            self.btn_at_compress.setEnabled(False)
         
         self.at_worker = AudioTranscriberWorker(target_files, mode, model_name, merge_mp3)
         self.at_worker.log_signal.connect(self.at_log.append)
@@ -2961,6 +3008,8 @@ class MainApp(QWidget):
         self.btn_at_transcribe.setEnabled(False)
         self.btn_at_all.setEnabled(False)
         self.btn_at_merge.setEnabled(False)
+        if hasattr(self, 'btn_at_compress'):
+            self.btn_at_compress.setEnabled(False)
 
         self.at_log.append(f"🚀 MP3/SRT 합치기 작업 시작: {folder_path}")
         
@@ -2971,11 +3020,13 @@ class MainApp(QWidget):
         self.merge_worker.start()
         
     def on_at_finished(self, msg):
-        self.at_log.append(f"🏁 {msg}")
         self.btn_at_convert.setEnabled(True)
         self.btn_at_transcribe.setEnabled(True)
         self.btn_at_all.setEnabled(True)
         self.btn_at_merge.setEnabled(True)
+        if hasattr(self, 'btn_at_compress'):
+            self.btn_at_compress.setEnabled(True)
+        self.at_log.append(f"🏁 {msg}")
         
     def on_at_error(self, err):
         self.at_log.append(f"❌ 오류: {err}")
@@ -2983,6 +3034,8 @@ class MainApp(QWidget):
         self.btn_at_transcribe.setEnabled(True)
         self.btn_at_all.setEnabled(True)
         self.btn_at_merge.setEnabled(True)
+        if hasattr(self, 'btn_at_compress'):
+            self.btn_at_compress.setEnabled(True)
 
     def copy_to_clipboard(self, widget):
         text = ""
@@ -6411,8 +6464,8 @@ class AudioTranscriberWorker(QThread):
     def __init__(self, target_files, mode, model_name, merge_mp3=False):
         super().__init__()
         self.target_files = target_files # List of absolute file paths
-        self.mode = mode # 'convert', 'transcribe', 'all'
-        self.model_name = model_name
+        self.mode = mode # 'convert', 'transcribe', 'all', 'compress'
+        self.model_name = model_name # Acts as bitrate if mode is 'compress'
         self.merge_mp3 = merge_mp3
 
     def run(self):
@@ -6570,6 +6623,45 @@ class AudioTranscriberWorker(QThread):
                         self.log_signal.emit("   ℹ️ 합칠 MP3 파일이 부족합니다 (2개 미만).")
                 else:
                     self.log_signal.emit("   ⚠️ 폴더 경로를 찾을 수 없어 합치기를 건너뜁니다.")
+
+            # --- MP3 Compression ---
+            if self.mode == "compress":
+                self.log_signal.emit(f"📉 MP3 용량 줄이기 시작 (총 {len(self.target_files)}개)")
+                creation_flags = 0x08000000 if os.name == 'nt' else 0
+                
+                # bitrate selection from model_name parameter
+                bitrate = self.model_name if "k" in str(self.model_name) else "64k"
+
+                for in_path in self.target_files:
+                    if not os.path.exists(in_path):
+                        continue
+                    if not in_path.lower().endswith(('.mp3', '.wav', '.m4a', '.mp4')):
+                        continue
+                        
+                    in_dir = os.path.dirname(in_path)
+                    base, ext = os.path.splitext(os.path.basename(in_path))
+                    out_path = os.path.join(in_dir, f"{base}_compressed.mp3")
+                    f_name = os.path.basename(in_path)
+                    
+                    self.log_signal.emit(f"   압축 중: {f_name} -> {bitrate} (Mono, 16kHz) ...")
+                    
+                    # Command to reduce size: lower bitrate, mono, and lower sample rate
+                    # -ac 1 (mono) reduces size dramatically for stereo sources
+                    # -ar 16000 is optimized for speech/Whisper
+                    cmd = [
+                        ffmpeg_exe, "-y", "-i", in_path,
+                        "-c:a", "libmp3lame", "-b:a", bitrate, 
+                        "-ac", "1", "-ar", "16000",
+                        out_path
+                    ]
+                    try:
+                        subprocess.run(
+                            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            check=True, creationflags=creation_flags
+                        )
+                        self.log_signal.emit(f"   ✅ 압축 완료: {os.path.basename(out_path)}")
+                    except Exception as e:
+                        self.log_signal.emit(f"   ❌ 압축 실패 ({f_name}): {e}")
 
             # --- MP3 -> SRT ---
             if self.mode in ["transcribe", "all"]:
