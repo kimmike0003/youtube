@@ -157,11 +157,11 @@ class AudioSrtMergerWorker(QThread):
         blocks = content.strip().split('\n\n')
         for block in blocks:
             lines = block.strip().split('\n')
-            if len(lines) >= 3:
+            if len(lines) >= 2:
                 try:
                     # lines[0]: Index, lines[1]: Time, lines[2:]: Text
                     time_line = lines[1].strip()
-                    text = "\n".join(lines[2:])
+                    text = "\n".join(lines[2:]) if len(lines) > 2 else ""
                     
                     if '-->' in time_line:
                         s_str, e_str = time_line.split('-->')
@@ -237,7 +237,7 @@ class VideoMergerWorker(QThread):
 
             # 병렬 처리를 위한 작업 리스트 생성
             tasks = []
-            valid_exts = ['.png', '.jpg', '.jpeg', '.webp']
+            valid_exts = ['.png', '.jpg', '.jpeg', '.webp', '.mp4', '.mov', '.mkv', '.avi']
             
             for i, audio_name in enumerate(audio_files):
                 base_name = os.path.splitext(audio_name)[0]
@@ -327,7 +327,8 @@ class VideoMergerWorker(QThread):
             self.log_signal.emit(f"🚀 총 {len(tasks)}개의 영상 합성을 시작합니다. (병렬 처리 모드)")
             
             # ThreadPoolExecutor를 사용하여 병렬 작업 수행
-            max_workers = min(2, multiprocessing.cpu_count()) # 메모리 할당 오류 방지를 위해 최대 2개로 제한
+            # [Speed Optimize] Increase parallel workers from 2 to up to 4
+            max_workers = min(4, multiprocessing.cpu_count()) 
             success_count = 0
             
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -353,6 +354,7 @@ class VideoMergerWorker(QThread):
 
     def process_single_video(self, task):
         img_path, audio_path, output_path, base_name, task_effect_config = task
+        creation_flags = 0x08000000 if os.name == 'nt' else 0
         
         # [Fix] 고유 임시 디렉토리 생성 (충돌 방지 및 안전한 삭제)
         temp_dir = os.path.join(os.path.dirname(output_path), f"temp_{base_name}_{int(time.time())}_{os.getpid()}")
@@ -413,7 +415,8 @@ class VideoMergerWorker(QThread):
                     for seg in segments:
                         sub_timing_list.append((seg['start'], seg['end'], seg['text']))
                     if sub_timing_list:
-                        self.log_signal.emit(f"   ℹ️ [SRT] {base_name}: {len(sub_timing_list)}개 자막 구간 싱크 적용")
+                        # self.log_signal.emit(f"   ℹ️ [SRT] {base_name}: {len(sub_timing_list)}개 자막 구간 싱크 적용")
+                        pass
             
             if os.path.exists(meta_path):
                 # JSON이 있으면 덮어쓰기 (더 정밀함)
@@ -482,34 +485,53 @@ class VideoMergerWorker(QThread):
                     temp_files.append(sub_path)
                     subtitle_inputs.append((sub_path, start_t, real_end))
 
-            # [NEW] Multi-Image Switching Logic
             image_checkpoints = []
             final_img_concat_path = None
             
-            # segments were parsed above
-            if segments:
-                # Use os.path.dirname(audio_path) or self.image_dir as base
-                # In run(), we checked self.image_dir.
+            # [Fix] Ensure track 1 is searched even if skipped in segments, or better, don't skip it
+            if segments or multi_img_detected:
+                # search_dirs already defined
                 search_dirs = [os.path.dirname(audio_path), self.image_dir, os.path.join(self.image_dir, base_name)]
                 
-                found_at_least_one = False
-                for seg in segments:
-                    idx = seg['index']
-                    t = seg['start']
-                    
+                # We need a list of indices to check. Normal multi-image uses 1, 2, 3...
+                # If segments exist, we use indices from segments.
+                indices_to_check = []
+                if segments:
+                    for seg in segments:
+                        indices_to_check.append((seg['index'], seg['start']))
+                else:
+                    # Generic fallback if no SRT but multi-image detected (e.g. constant slide)
+                    indices_to_check.append((1, 0.0))
+
+                self.log_signal.emit(f"   📑 SRT 기반 배경 탐색 시작 (총 {len(indices_to_check)}개 트랙)")
+                for idx_val, t_val in indices_to_check:
+                    found_path = None
                     for s_dir in search_dirs:
-                        found_path = None
-                        for ext in ['.jpg', '.png', '.jpeg', '.webp']:
-                            check = os.path.join(s_dir, f"{idx}{ext}")
+                        for ext in ['.jpg', '.png', '.jpeg', '.webp', '.mp4', '.mov', '.mkv', '.avi']:
+                            check = os.path.join(s_dir, f"{idx_val}{ext}")
                             if os.path.exists(check):
                                 found_path = check
+                                self.log_signal.emit(f"   ✅ Track {idx_val} ({t_val:.2f}s): 배경 찾음 -> {os.path.basename(check)}")
                                 break
-                        if found_path:
-                            image_checkpoints.append((t, found_path))
-                            found_at_least_one = True
-                            break
+                        if found_path: break
+                    
+                    if found_path:
+                        image_checkpoints.append((t_val, found_path))
                 
-                if len(image_checkpoints) > 1:
+                # If track 1 was missing from segments but exists as 1.jpg, force add it at 0.0
+                if not any(t == 0.0 for t, _ in image_checkpoints):
+                    for s_dir in search_dirs:
+                        for ext in ['.jpg', '.png', '.jpeg', '.webp', '.mp4', '.mov', '.mkv', '.avi']:
+                            check = os.path.join(s_dir, f"1{ext}")
+                            if os.path.exists(check):
+                                image_checkpoints.insert(0, (0.0, check))
+                                self.log_signal.emit(f"   🔍 Track 1: 배경 강제 삽입 (0.0s) -> {os.path.basename(check)}")
+                                break
+                        if len(image_checkpoints) > 0 and image_checkpoints[0][0] == 0.0: break
+                
+                self.log_signal.emit(f"   📊 최종 교체 지점: {len(image_checkpoints)}개 확정")
+
+                if len(image_checkpoints) >= 1: # Even 1 image is enough for concat if it replaces global loop
                     # Create Concat List for Images
                     # [Fix] Use sub-folder in temp_dir for easier cleanup
                     image_temp_dir = os.path.join(temp_dir, "imgs")
@@ -538,6 +560,25 @@ class VideoMergerWorker(QThread):
                                 processed_imgs.append((t, scaled_p))
                                 temp_files.append(scaled_p)
                         except Exception as e:
+                            # [NEW] If it's a video file, try extracting first frame using FFmpeg
+                            if img_p.lower().endswith(('.mp4', '.mov', '.mkv', '.avi')):
+                                try:
+                                    frame_p = os.path.join(image_temp_dir, f"frame_{i_p_idx}.png")
+                                    cmd_frame = [
+                                        ffmpeg_exe, "-y", "-i", img_p,
+                                        "-frames:v", "1", "-q:v", "2",
+                                        "-vf", f"scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=decrease,pad={TARGET_W}:{TARGET_H}:(ow-iw)/2:(oh-ih)/2",
+                                        frame_p
+                                    ]
+                                    subprocess.run(cmd_frame, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, creationflags=creation_flags)
+                                    processed_imgs.append((t, frame_p))
+                                    temp_files.append(frame_p)
+                                    self.log_signal.emit(f"   🖼️ [Video-Frame] {os.path.basename(img_p)} 에서 화면 추출 완료")
+                                    continue
+                                except Exception as ve:
+                                    self.log_signal.emit(f"   ❌ [Video-Error] {os.path.basename(img_p)} 화면 추출 실패: {ve}")
+                                    pass
+                            
                             # Fallback: Black background to prevent resolution mismatch OOM/Error
                             black_fallback = os.path.join(image_temp_dir, f"fallback_{i_p_idx}.png")
                             Image.new('RGB', (TARGET_W, TARGET_H), (0,0,0)).save(black_fallback)
@@ -578,7 +619,7 @@ class VideoMergerWorker(QThread):
             # [Input 0] 배경 이미지 (Loop, Concat, or Black) OR 배경 비디오
             FPS = 30
             is_video_input = False
-            if img_path and img_path.lower().endswith('.mp4'):
+            if img_path and img_path.lower().endswith(('.mp4', '.mov', '.mkv', '.avi')):
                 is_video_input = True
                 
             if final_img_concat_path:
@@ -666,7 +707,8 @@ class VideoMergerWorker(QThread):
             elif img_path and os.path.exists(img_path) and img_path != "MULTI_IMAGE_MODE":
                 # Effect Config (Zoom/Pan)
                 # [Anti-Jitter] 8K(7680x4320) Ultra-Supersampling
-                SUPER_W, SUPER_H = 7680, 4320
+                # [Speed Optimize] 8K -> 4K (Still ultra-smooth for 1080p, but 4x faster)
+                SUPER_W, SUPER_H = 3840, 2160
                 filter_parts.append(f"[0:v]scale={SUPER_W}:{SUPER_H}:flags=bicubic,setsar=1:1,fps={FPS}[v_high]")
                 
                 # Zoom/Pan Expression
@@ -739,7 +781,7 @@ class VideoMergerWorker(QThread):
                 print(f"[Debug] Effect Config: {effect_config}")
             
             # Run
-            creation_flags = 0x08000000 if os.name == 'nt' else 0
+            # creation_flags defined at function top
             process = subprocess.Popen(
                 command, 
                 stdout=subprocess.PIPE, 
@@ -867,11 +909,11 @@ class VideoMergerWorker(QThread):
         blocks = content.strip().split('\n\n')
         for block in blocks:
             lines = block.strip().split('\n')
-            if len(lines) >= 3:
+            if len(lines) >= 2:
                 try:
                     idx = int(lines[0].strip())
                     time_line = lines[1].strip()
-                    text = " ".join(lines[2:])
+                    text = " ".join(lines[2:]) if len(lines) > 2 else ""
                     
                     if '-->' in time_line:
                         s_str, e_str = time_line.split('-->')
@@ -1479,7 +1521,7 @@ class VideoConcatenatorWorker(QThread):
             command.extend(["-map", final_v_label, "-map", "[out_a]"])
             
             # Encoding options
-            command.extend(["-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p"])
+            command.extend(["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p"])
             command.extend(["-c:a", "aac", "-b:a", "192k"])
             
             command.extend(["-y", self.output_file])
