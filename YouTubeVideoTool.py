@@ -1637,6 +1637,7 @@ class MainApp(QWidget):
 
     def _run_tts_thread(self, tasks, voice_id, model_id, stability, similarity, style, speed, volume, custom_dir, trim_end=0.0, do_merge=True):
         success_count = 0
+        request_ids = []
         try:
             for task in tasks:
                 if self.stop_tts_flag:
@@ -1648,7 +1649,8 @@ class MainApp(QWidget):
                 sub_segments = task[2] if len(task) > 2 else None
                 
                 try:
-                    save_path = self.tts_client.generate_audio(
+                    # previous_request_ids를 전달하여 자연스러운 연결 보장
+                    save_path, current_rid = self.tts_client.generate_audio(
                         text=text_chunk, 
                         voice_id=voice_id, 
                         model_id=model_id,
@@ -1656,11 +1658,15 @@ class MainApp(QWidget):
                         similarity_boost=similarity,
                         style=style,
                         speed=speed,
-                        volume=volume, # 볼륨 추가
+                        volume=volume,
                         filename=filename,
                         custom_dir=custom_dir,
-                        sub_segments=sub_segments # 자막 세그먼트 전달
+                        sub_segments=sub_segments,
+                        previous_request_ids=request_ids
                     )
+                    
+                    if current_rid:
+                        request_ids.append(current_rid)
                     self.log_signal.emit(f"✅ 생성 완료: {os.path.basename(save_path)}")
                     
                     # 트리밍 적용

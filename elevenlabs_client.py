@@ -7,6 +7,8 @@ import subprocess
 import tempfile
 import io
 import imageio_ffmpeg
+import json
+from typing import List, Dict, Optional, Tuple
 
 class ElevenLabsClient:
     def __init__(self):
@@ -125,7 +127,8 @@ class ElevenLabsClient:
                        speed: float = 1.0, 
                        volume: float = 1.0, # 볼륨 조절 추가
                        filename: str = None, custom_dir: str = None,
-                       sub_segments: List[str] = None) -> str:
+                       sub_segments: List[str] = None,
+                       previous_request_ids: List[str] = None) -> Tuple[str, Optional[str]]:
         
         if not self.client:
             raise ValueError("API Key not set. Please select an API Key.")
@@ -135,11 +138,12 @@ class ElevenLabsClient:
             os.makedirs(output_dir, exist_ok=True)
 
         try:
-            # 타임스탬프를 포함하여 생성 요청
-            response = self.client.text_to_speech.convert_with_timestamps(
+            # previous_request_ids를 사용하여 연속성 있는 오디오 생성
+            with self.client.text_to_speech.with_raw_response.convert_with_timestamps(
                 text=text,
                 voice_id=voice_id,
                 model_id=model_id,
+                previous_request_ids=previous_request_ids,
                 voice_settings={
                     "stability": stability,
                     "similarity_boost": similarity_boost,
@@ -147,83 +151,71 @@ class ElevenLabsClient:
                     "use_speaker_boost": use_speaker_boost,
                     "speed": speed # 속도 설정 반영
                 }
-            )
-            
-            # 오디오 데이터 추출 (SDK 버전/타입에 따라 다양할 수 있음)
-            # 최근 SDK 버전에서는 audio_base_64 (언더바 2개) 형식을 사용함
-            audio_raw = None
-            alignment = None
-            
-            if hasattr(response, "audio_base_64"):
-                audio_raw = response.audio_base_64
-            elif hasattr(response, "audio_base64"):
-                audio_raw = response.audio_base64
-            elif hasattr(response, "audio"):
-                audio_raw = response.audio
-            elif isinstance(response, dict):
-                audio_raw = response.get("audio_base_64") or response.get("audio_base64") or response.get("audio")
+            ) as response:
+                current_request_id = response.headers.get("request-id")
                 
-            if hasattr(response, "alignment"):
-                alignment = response.alignment
-            elif isinstance(response, dict):
-                alignment = response.get("alignment")
-
-            if audio_raw is None:
-                raise AttributeError(f"Could not find audio data in response: {type(response)}")
+                # Raw response에서 JSON 파싱
+                resp_json = json.loads(response.content)
                 
-            audio_bytes = base64.b64decode(audio_raw)
+                audio_raw = resp_json.get("audio_base_64") or resp_json.get("audio_base64") or resp_json.get("audio")
+                alignment = resp_json.get("alignment")
 
-            # 파일명 결정
-            if filename:
-                if not filename.endswith('.mp3'):
-                    filename += ".mp3"
-                filepath = os.path.join(output_dir, filename)
-            else:
-                import uuid
-                filename = f"{uuid.uuid4()}.mp3"
-                filepath = os.path.join(output_dir, filename)
+                if audio_raw is None:
+                    raise AttributeError(f"Could not find audio data in response: {type(resp_json)}")
+                    
+                audio_bytes = base64.b64decode(audio_raw)
 
-            # 오디오 파일 저장
-            if volume == 1.0:
-                with open(filepath, "wb") as f:
-                    f.write(audio_bytes)
-            else:
-                # ffmpeg를 직접 사용하여 볼륨 조절
-                try:
-                    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
-                        tmp.write(audio_bytes)
-                        tmp_path = tmp.name
-                    
-                    # ffmpeg 명령어: volume=2.0 (2배), volume=0.5 (절반)
-                    cmd = [
-                        ffmpeg_exe, "-y", "-i", tmp_path,
-                        "-filter:a", f"volume={volume}",
-                        "-c:a", "libmp3lame", "-q:a", "2",
-                        filepath
-                    ]
-                    
-                    # 콘솔창 안뜨게 설정 (Windows)
-                    startupinfo = None
-                    if os.name == 'nt':
-                        startupinfo = subprocess.STARTUPINFO()
-                        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                    
-                    result = subprocess.run(cmd, check=True, startupinfo=startupinfo, capture_output=True)
-                    print(f"Volume adjusted to {volume} using FFmpeg.")
-                    
-                    if os.path.exists(tmp_path):
-                        os.remove(tmp_path)
-                except Exception as fe:
-                    print(f"ffmpeg 볼륨 조절 오류 (원본 저장): {fe}")
+                # 파일명 결정
+                if filename:
+                    if not filename.endswith('.mp3'):
+                        filename += ".mp3"
+                    filepath = os.path.join(output_dir, filename)
+                else:
+                    import uuid
+                    filename = f"{uuid.uuid4()}.mp3"
+                    filepath = os.path.join(output_dir, filename)
+
+                # 오디오 파일 저장
+                if volume == 1.0:
                     with open(filepath, "wb") as f:
                         f.write(audio_bytes)
+                else:
+                    # ffmpeg를 직접 사용하여 볼륨 조절
+                    try:
+                        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
+                            tmp.write(audio_bytes)
+                            tmp_path = tmp.name
+                        
+                        # ffmpeg 명령어: volume=2.0 (2배), volume=0.5 (절반)
+                        cmd = [
+                            ffmpeg_exe, "-y", "-i", tmp_path,
+                            "-filter:a", f"volume={volume}",
+                            "-c:a", "libmp3lame", "-q:a", "2",
+                            filepath
+                        ]
+                        
+                        # 콘솔창 안뜨게 설정 (Windows)
+                        startupinfo = None
+                        if os.name == 'nt':
+                            startupinfo = subprocess.STARTUPINFO()
+                            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                        
+                        subprocess.run(cmd, check=True, startupinfo=startupinfo, capture_output=True)
+                        print(f"Volume adjusted to {volume} using FFmpeg.")
+                        
+                        if os.path.exists(tmp_path):
+                            os.remove(tmp_path)
+                    except Exception as fe:
+                        print(f"ffmpeg 볼륨 조절 오류 (원본 저장): {fe}")
+                        with open(filepath, "wb") as f:
+                            f.write(audio_bytes)
 
-            # 타이밍 메타데이터(JSON) 저장 - SRT 대신 데이터로 관리
-            meta_path = filepath.replace(".mp3", ".json")
-            self.save_alignment_metadata(alignment, meta_path, sub_segments)
-            
-            return filepath
+                # 타이밍 메타데이터(JSON) 저장
+                meta_path = filepath.replace(".mp3", ".json")
+                self.save_alignment_metadata(alignment, meta_path, sub_segments)
+                
+                return filepath, current_request_id
         except Exception as e:
             raise e
 
