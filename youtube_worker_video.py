@@ -1335,28 +1335,9 @@ class VideoDubbingWorker(VideoMergerWorker):
             
             command.extend(["-t", f"{audio_duration:.3f}"])
             
-            # [Optimization] Encoder Selection & Hardware Acceleration
-            creation_flags = 0x08000000 if os.name == 'nt' else 0
-            if not hasattr(VideoMergerWorker, "_best_encoder"):
-                VideoMergerWorker._best_encoder = "libx264"
-                try:
-                    probe_cmd = [ffmpeg_exe, "-encoders"]
-                    p_res = subprocess.run(probe_cmd, capture_output=True, text=True, creationflags=creation_flags)
-                    if "h264_nvenc" in p_res.stdout:
-                        VideoMergerWorker._best_encoder = "h264_nvenc"
-                    elif "h264_qsv" in p_res.stdout:
-                        VideoMergerWorker._best_encoder = "h264_qsv"
-                except:
-                    pass
+            # [CPU Fixed] Use libx264 for stability and compatibility
+            enc_options = ["-c:v", "libx264", "-preset", "superfast", "-crf", "28"]
             
-            v_encoder = VideoMergerWorker._best_encoder
-            if v_encoder == "h264_nvenc":
-                enc_options = ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "28", "-b:v", "0"]
-            elif v_encoder == "h264_qsv":
-                enc_options = ["-c:v", "h264_qsv", "-preset", "superfast", "-global_quality", "26"]
-            else:
-                enc_options = ["-c:v", "libx264", "-preset", "superfast", "-crf", "30"]
-
             command.extend(enc_options)
             command.extend(["-pix_fmt", "yuv420p"])
             command.extend(["-c:a", "aac", "-b:a", "192k"])
@@ -1485,11 +1466,13 @@ class VideoConcatenatorWorker(QThread):
     finished = pyqtSignal(str, float)
     error = pyqtSignal(str)
 
-    def __init__(self, video_dir, output_file, watermark_path=None):
+    def __init__(self, video_dir, output_file, watermark_path=None, crf=28):
         super().__init__()
         self.video_dir = video_dir
         self.output_file = output_file
         self.watermark_path = watermark_path
+        self.crf = crf 
+        self.gap_duration = 0.0
 
     def run(self):
         start_time = time.time()
@@ -1502,7 +1485,9 @@ class VideoConcatenatorWorker(QThread):
             except ImportError:
                 ffmpeg_exe = "ffmpeg"
 
-            files = [f for f in os.listdir(self.video_dir) if f.lower().endswith('.mp4')]
+            out_basename = os.path.basename(self.output_file).lower()
+            files = [f for f in os.listdir(self.video_dir) 
+                     if f.lower().endswith('.mp4') and f.lower() != out_basename]
             
             def natural_sort_key(s):
                 return [int(text) if text.isdigit() else text.lower()
@@ -1551,20 +1536,21 @@ class VideoConcatenatorWorker(QThread):
                 
                 filter_complex += f"[{i}:a]aresample=48000:async=1[a{i}];"
                 
-            gap_duration = 0.2
+            gap_dur = getattr(self, 'gap_duration', 0.0)
             concat_inputs = []
             
             for i in range(len(final_input_list)):
                 v_source = f"[v{i}]"
                 a_source = f"[a{i}]"
                 
-                # Apply gap padding except for the very last clip
-                if i < len(final_input_list) - 1:
+                # Apply gap padding except for the very last clip, only if gap_dur > 0
+                if gap_dur > 0 and i < len(final_input_list) - 1:
                      pad_v_label = f"[v{i}_pad]"
                      pad_a_label = f"[a{i}_pad]"
                      
-                     filter_complex += (f"{v_source}tpad=stop_mode=clone:stop_duration={gap_duration}{pad_v_label};"
-                                        f"{a_source}apad=pad_dur={gap_duration}{pad_a_label};")
+                     # Using stop_mode=add (black) instead of clone for better compatibility
+                     filter_complex += (f"{v_source}tpad=stop_mode=add:stop_duration={gap_dur}{pad_v_label};"
+                                        f"{a_source}apad=pad_dur={gap_dur}{pad_a_label};")
                      
                      concat_inputs.append(pad_v_label)
                      concat_inputs.append(pad_a_label)
@@ -1591,8 +1577,13 @@ class VideoConcatenatorWorker(QThread):
             command.extend(["-filter_complex", filter_complex])
             command.extend(["-map", final_v_label, "-map", "[out_a]"])
             
-            # Encoding options - CRF 28 for better compression, medium preset for balanced efficiency
-            command.extend(["-c:v", "libx264", "-preset", "medium", "-crf", "28", "-pix_fmt", "yuv420p"])
+            # [CPU Fixed] Force CPU encoding (libx264)
+            target_crf = str(self.crf)
+            enc_options = ["-c:v", "libx264", "-preset", "fast", "-crf", target_crf]
+            self.log_signal.emit("   ℹ️ CPU 전용 인코딩 사용 (libx264)")
+
+            command.extend(enc_options)
+            command.extend(["-pix_fmt", "yuv420p"])
             command.extend(["-c:a", "aac", "-b:a", "192k"])
             
             command.extend(["-y", self.output_file])

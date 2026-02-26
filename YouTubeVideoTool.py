@@ -795,6 +795,32 @@ class MainApp(QWidget):
         self.chk_auto_srt.setStyleSheet("font-weight: bold; color: #E91E63; margin-top: 10px;")
         layout.addWidget(self.chk_auto_srt)
 
+        # [New] Compression and Gap Settings
+        options_group = QGroupBox("추가 옵션 및 압축 설정")
+        options_layout = QGridLayout()
+
+        # Quality (CRF)
+        options_layout.addWidget(QLabel("압축 품질 (낮을수록 고화질):"), 0, 0)
+        self.combo_concat_quality = QComboBox()
+        self.combo_concat_quality.addItem("고화질 (CRF 23)", 23)
+        self.combo_concat_quality.addItem("표준 (CRF 28)", 28)
+        self.combo_concat_quality.addItem("저용량 (CRF 32)", 32)
+        self.combo_concat_quality.addItem("최저용량 (CRF 36)", 36)
+        self.combo_concat_quality.setCurrentIndex(1)
+        options_layout.addWidget(self.combo_concat_quality, 0, 1)
+
+
+        # Gap Duration
+        options_layout.addWidget(QLabel("영상 사이 간격 (초):"), 1, 0)
+        self.spin_concat_gap = QDoubleSpinBox()
+        self.spin_concat_gap.setRange(0.0, 2.0)
+        self.spin_concat_gap.setSingleStep(0.1)
+        self.spin_concat_gap.setValue(0.0) # 기본 0.0으로 변경 (멈춤 현상 가능성 차단)
+        options_layout.addWidget(self.spin_concat_gap, 1, 1)
+
+        options_group.setLayout(options_layout)
+        layout.addWidget(options_group)
+
 
         # 합치기/중지 버튼 (Horizontal Layout)
         btn_layout = QHBoxLayout()
@@ -1206,7 +1232,12 @@ class MainApp(QWidget):
         self.btn_stop_concat.setEnabled(True)
         self.concat_log.append("⏳ 영상 합치기 작업을 시작합니다...")
 
-        self.concat_worker = VideoConcatenatorWorker(in_dir, out_file, final_wm_path) # Pass validated path
+        # Get settings
+        crf = self.combo_concat_quality.currentData()
+        gap = self.spin_concat_gap.value()
+
+        self.concat_worker = VideoConcatenatorWorker(in_dir, out_file, final_wm_path, crf=crf) # Updated (CPU Only)
+        self.concat_worker.gap_duration = gap # Pass gap
         self.concat_worker.log_signal.connect(self.concat_log.append)
         self.concat_worker.finished.connect(self.on_video_concat_finished)
         self.concat_worker.error.connect(lambda e: [self.concat_log.append(f"❌ 오류: {e}"), self.btn_start_concat.setEnabled(True), self.btn_stop_concat.setEnabled(False)])
@@ -6371,104 +6402,7 @@ class BatchVideoEffectWorker(VideoMergerWorker):
             traceback.print_exc()
             self.error.emit(f"오류: {e}")
 
-class VideoConcatenatorWorker(QThread):
-    log_signal = pyqtSignal(str)
-    finished = pyqtSignal(str, float)
-    error = pyqtSignal(str)
 
-    def __init__(self, video_dir, output_file, watermark_path=None):
-        super().__init__()
-        self.video_dir = video_dir
-        self.output_file = output_file
-        self.watermark_path = watermark_path
-        self.process = None
-
-    def stop(self):
-        if self.process:
-            self.process.kill()
-            self.log_signal.emit("🛑 FFmpeg 프로세스를 강제 종료합니다.")
-
-    def run(self):
-        start_time = time.time()
-        temp_list_path = ""
-        try:
-            self.log_signal.emit("📂 영상 합치기 준비 중 (Concat Demuxer Mode)...")
-            
-            ffmpeg_exe = "ffmpeg"
-            try:
-                import imageio_ffmpeg
-                ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-            except: pass
-
-            if not os.path.exists(self.video_dir):
-                self.error.emit("입력 폴더가 존재하지 않습니다.")
-                return
-
-            all_files = os.listdir(self.video_dir)
-            files = [os.path.join(self.video_dir, f) for f in all_files if f.lower().endswith(('.mp4', '.avi', '.mov', '.mkv'))]
-            
-            if not files:
-                self.error.emit("합칠 영상 파일이 없습니다.")
-                return
-
-            files.sort(key=lambda s: [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', s)])
-            
-            self.log_signal.emit(f"🔢 총 {len(files)}개의 영상 파일 발견.")
-
-            temp_list_path = os.path.join(self.video_dir, f"concat_list_{int(time.time())}.txt")
-            with open(temp_list_path, "w", encoding='utf-8') as f:
-                for vid_path in files:
-                    safe_path = vid_path.replace("\\", "/").replace("'", "'\\''")
-                    f.write(f"file '{safe_path}'\n")
-            
-            command = [ffmpeg_exe]
-            command.extend(["-y", "-f", "concat", "-safe", "0", "-i", temp_list_path])
-            
-            map_options = []
-            
-            if self.watermark_path and os.path.isfile(self.watermark_path):
-                command.extend(["-i", self.watermark_path])
-                filter_complex = "[1:v]scale=200:-1[wm];[0:v][wm]overlay=main_w-overlay_w-20:20[v_out]"
-                command.extend(["-filter_complex", filter_complex])
-                map_options = ["-map", "[v_out]", "-map", "0:a"]
-            else:
-                map_options = ["-map", "0"]
-
-            command.extend(map_options)
-            
-            command.extend(["-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p"])
-            command.extend(["-c:a", "aac", "-b:a", "192k"])
-            
-            command.append(self.output_file)
-            
-            self.log_signal.emit(f"🚀 합치기 실행 (파일 리스트 방식)...")
-            
-            creation_flags = 0x08000000 if os.name == 'nt' else 0
-            self.process = subprocess.Popen(
-                command, 
-                stdout=subprocess.PIPE, 
-                stderr=subprocess.PIPE, 
-                universal_newlines=True, 
-                encoding='utf-8',
-                creationflags=creation_flags
-            )
-            
-            stdout, stderr = self.process.communicate()
-            
-            if self.process.returncode != 0:
-                self.error.emit(f"❌ FFmpeg 오류: {stderr}")
-            else:
-                elapsed = time.time() - start_time
-                self.finished.emit(f"✅ 완료: {os.path.basename(self.output_file)}", elapsed)
-            
-        except Exception as e:
-            self.error.emit(f"❌ 오류 발생: {e}")
-            import traceback
-            traceback.print_exc()
-        finally:
-            if temp_list_path and os.path.exists(temp_list_path):
-                try: os.remove(temp_list_path)
-                except: pass
 
 def exception_hook(exctype, value, tb):
     tb_str = "".join(traceback.format_exception(exctype, value, tb))
