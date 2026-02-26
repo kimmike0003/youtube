@@ -1591,8 +1591,8 @@ class VideoConcatenatorWorker(QThread):
             command.extend(["-filter_complex", filter_complex])
             command.extend(["-map", final_v_label, "-map", "[out_a]"])
             
-            # Encoding options
-            command.extend(["-c:v", "libx264", "-preset", "superfast", "-pix_fmt", "yuv420p"])
+            # Encoding options - CRF 28 for better compression, medium preset for balanced efficiency
+            command.extend(["-c:v", "libx264", "-preset", "medium", "-crf", "28", "-pix_fmt", "yuv420p"])
             command.extend(["-c:a", "aac", "-b:a", "192k"])
             
             command.extend(["-y", self.output_file])
