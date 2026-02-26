@@ -1649,7 +1649,7 @@ class MainApp(QWidget):
                 sub_segments = task[2] if len(task) > 2 else None
                 
                 try:
-                    # previous_request_ids를 전달하여 자연스러운 연결 보장
+                    # previous_request_ids를 전달하여 자연스러운 연결 보장 (프롬프트 제거)
                     save_path, current_rid = self.tts_client.generate_audio(
                         text=text_chunk, 
                         voice_id=voice_id, 
@@ -1662,7 +1662,7 @@ class MainApp(QWidget):
                         filename=filename,
                         custom_dir=custom_dir,
                         sub_segments=sub_segments,
-                        previous_request_ids=request_ids
+                        previous_request_ids=request_ids # 연속성 로직 복구
                     )
                     
                     if current_rid:

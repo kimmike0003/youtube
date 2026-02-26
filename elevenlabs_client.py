@@ -138,8 +138,9 @@ class ElevenLabsClient:
             os.makedirs(output_dir, exist_ok=True)
 
         try:
-            # previous_request_ids를 사용하여 연속성 있는 오디오 생성
-            with self.client.text_to_speech.with_raw_response.convert_with_timestamps(
+            # [calm, steady tone] 프롬프트가 포함될 수 있는 text 사용
+            # convert_with_timestamps를 직접 호출 (with_raw_response 제거)
+            response = self.client.text_to_speech.convert_with_timestamps(
                 text=text,
                 voice_id=voice_id,
                 model_id=model_id,
@@ -148,88 +149,103 @@ class ElevenLabsClient:
                     "stability": stability,
                     "similarity_boost": similarity_boost,
                     "style": style,
-                    "use_speaker_boost": use_speaker_boost,
-                    "speed": speed # 속도 설정 반영
+                    "use_speaker_boost": use_speaker_boost
                 }
-            ) as response:
-                current_request_id = response.headers.get("request-id")
-                
-                # Raw response에서 JSON 파싱
-                resp_json = json.loads(response.content)
-                
-                audio_raw = resp_json.get("audio_base_64") or resp_json.get("audio_base64") or resp_json.get("audio")
-                alignment = resp_json.get("alignment")
+            )
+            
+            # request-id는 기본 호출에서는 직접 가져오기 어려울 수 있으나, 
+            # 현재 로직에서 필수가 아니므로 None으로 처리하거나 속성이 있으면 가져옴
+            current_request_id = getattr(response, "request_id", None)
+            
+            # 응답 객체에서 직접 속성 추출
+            audio_raw = getattr(response, "audio_base_64", None) or getattr(response, "audio_base64", None)
+            alignment = getattr(response, "alignment", None)
 
-                if audio_raw is None:
-                    raise AttributeError(f"Could not find audio data in response: {type(resp_json)}")
+            if audio_raw is None:
+                raise AttributeError(f"Could not find audio data in response: {response}")
+                
+            audio_bytes = base64.b64decode(audio_raw)
+
+            # 파일명 결정
+            if filename:
+                if not filename.endswith('.mp3'):
+                    filename += ".mp3"
+                filepath = os.path.join(output_dir, filename)
+            else:
+                import uuid
+                filename = f"{uuid.uuid4()}.mp3"
+                filepath = os.path.join(output_dir, filename)
+
+            # 오디오 파일 저장
+            if volume == 1.0:
+                with open(filepath, "wb") as f:
+                    f.write(audio_bytes)
+            else:
+                # ffmpeg를 직접 사용하여 볼륨 조절
+                try:
+                    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
+                        tmp.write(audio_bytes)
+                        tmp_path = tmp.name
                     
-                audio_bytes = base64.b64decode(audio_raw)
-
-                # 파일명 결정
-                if filename:
-                    if not filename.endswith('.mp3'):
-                        filename += ".mp3"
-                    filepath = os.path.join(output_dir, filename)
-                else:
-                    import uuid
-                    filename = f"{uuid.uuid4()}.mp3"
-                    filepath = os.path.join(output_dir, filename)
-
-                # 오디오 파일 저장
-                if volume == 1.0:
+                    # ffmpeg 명령어: volume=2.0 (2배), volume=0.5 (절반)
+                    cmd = [
+                        ffmpeg_exe, "-y", "-i", tmp_path,
+                        "-filter:a", f"volume={volume}",
+                        "-c:a", "libmp3lame", "-q:a", "2",
+                        filepath
+                    ]
+                    
+                    # 콘솔창 안뜨게 설정 (Windows)
+                    startupinfo = None
+                    if os.name == 'nt':
+                        startupinfo = subprocess.STARTUPINFO()
+                        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    
+                    subprocess.run(cmd, check=True, startupinfo=startupinfo, capture_output=True)
+                    print(f"Volume adjusted to {volume} using FFmpeg.")
+                    
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except Exception as fe:
+                    print(f"ffmpeg 볼륨 조절 오류 (원본 저장): {fe}")
                     with open(filepath, "wb") as f:
                         f.write(audio_bytes)
-                else:
-                    # ffmpeg를 직접 사용하여 볼륨 조절
-                    try:
-                        ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
-                            tmp.write(audio_bytes)
-                            tmp_path = tmp.name
-                        
-                        # ffmpeg 명령어: volume=2.0 (2배), volume=0.5 (절반)
-                        cmd = [
-                            ffmpeg_exe, "-y", "-i", tmp_path,
-                            "-filter:a", f"volume={volume}",
-                            "-c:a", "libmp3lame", "-q:a", "2",
-                            filepath
-                        ]
-                        
-                        # 콘솔창 안뜨게 설정 (Windows)
-                        startupinfo = None
-                        if os.name == 'nt':
-                            startupinfo = subprocess.STARTUPINFO()
-                            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                        
-                        subprocess.run(cmd, check=True, startupinfo=startupinfo, capture_output=True)
-                        print(f"Volume adjusted to {volume} using FFmpeg.")
-                        
-                        if os.path.exists(tmp_path):
-                            os.remove(tmp_path)
-                    except Exception as fe:
-                        print(f"ffmpeg 볼륨 조절 오류 (원본 저장): {fe}")
-                        with open(filepath, "wb") as f:
-                            f.write(audio_bytes)
 
-                # 타이밍 메타데이터(JSON) 저장
-                meta_path = filepath.replace(".mp3", ".json")
-                self.save_alignment_metadata(alignment, meta_path, sub_segments)
-                
-                return filepath, current_request_id
+            # 타이밍 메타데이터(JSON) 저장
+            meta_path = filepath.replace(".mp3", ".json")
+            self.save_alignment_metadata(alignment, meta_path, sub_segments)
+            
+            return filepath, current_request_id
         except Exception as e:
             raise e
 
     def save_alignment_metadata(self, alignment, json_path, sub_segments=None):
         """ElevenLabs alignment 데이터를 JSON으로 저장 (향후 실시간 매칭용)"""
+        if not alignment:
+            return
+            
         try:
             import json
+            
+            # alignment가 dict인 경우와 객체인 경우 모두 대응
+            if isinstance(alignment, dict):
+                characters = alignment.get("characters")
+                start_times = alignment.get("character_start_times_seconds")
+                end_times = alignment.get("character_end_times_seconds")
+            else:
+                characters = getattr(alignment, "characters", None)
+                start_times = getattr(alignment, "character_start_times_seconds", None)
+                end_times = getattr(alignment, "character_end_times_seconds", None)
+                
             data = {
-                "characters": alignment.characters,
-                "character_start_times_seconds": alignment.character_start_times_seconds,
-                "character_end_times_seconds": alignment.character_end_times_seconds,
+                "characters": characters,
+                "character_start_times_seconds": start_times,
+                "character_end_times_seconds": end_times,
                 "sub_segments": sub_segments
             }
             with open(json_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
         except Exception as e:
             print(f"타이밍 메타데이터 저장 오류: {e}")
+
