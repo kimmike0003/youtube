@@ -607,6 +607,7 @@ class GrokMultiTabWorker(QThread):
             
             total = len(files)
             tab_status = {t: None for t in tabs} # {tab: {'file': path, 'start_time': t, 'step': 'uploading'|'generating'}}
+            tab_old_videos = {t: [] for t in tabs} # [NEW] 이전 영상 URL 추적용
             
             processed_count = 0
             file_idx = 0
@@ -630,6 +631,9 @@ class GrokMultiTabWorker(QThread):
                         fname = os.path.basename(current_file)
                         
                         self.log_signal.emit(f"▶ [탭 {tabs.index(tab)+1}] {fname} 업로드 시작...")
+                        
+                        # [NEW] 업로드 전 기존 영상 목록 저장
+                        tab_old_videos[tab] = self.driver.execute_script("return Array.from(document.querySelectorAll('video')).map(v => v.src);")
                         
                         # 업로드 로직
                         if self.upload_image(current_file):
@@ -695,7 +699,7 @@ class GrokMultiTabWorker(QThread):
                              continue
 
                         # 다운로드 확인
-                        video_url = self.check_video_generated()
+                        video_url = self.check_video_generated(tab_old_videos[tab])
                         if video_url:
                             # 다운로드 수행
                             save_name = os.path.splitext(fname)[0] + ".mp4"
@@ -710,9 +714,10 @@ class GrokMultiTabWorker(QThread):
                                 failed_items.append(curr['file'])
                             
                             # 작업 완료 -> 초기화
-                            # 다음 작업을 위해 페이지 리셋 (새로고침이 가장 깔끔)
-                            self.driver.refresh()
-                            time.sleep(1) # Refresh 대기
+                            # 다음 작업을 위해 페이지 리셋 (URL 직접 이동이 더 확실함)
+                            self.log_signal.emit(f"  🔄 [탭 {tabs.index(tab)+1}] 페이지 초기화 중...")
+                            self.driver.get('https://grok.com/imagine')
+                            time.sleep(3) # 로딩 대기 강화
                             
                             tab_status[tab] = None
                             processed_count += 1
@@ -738,34 +743,40 @@ class GrokMultiTabWorker(QThread):
     def upload_image(self, file_path):
         """grok의 파일 인풋을 찾아 업로드"""
         try:
-            # 0. 혹시 열려있을지 모르는 모달 닫기 (검색창 등)
+            # 0. 혹시 열려있을지 모르는 모달 닫기
             ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
-            time.sleep(0.5)
+            time.sleep(1.5) # 대기 시간 상향
 
-            # 1. Input File 찾기
-            # Grok은 보통 input[type=file]이 hidden 상태임
-            file_input = self.driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
+            # 1. Input File 찾기 (여러 개 있을 경우 대비)
+            file_input = None
+            for _ in range(3): # 최대 3초 대기하며 찾기
+                inputs = self.driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
+                if inputs:
+                    # 가장 마지막에 생성된 input이 현재 활성 상태일 가능성이 높음
+                    file_input = inputs[-1]
+                    break
+                time.sleep(1)
+
             if not file_input:
                 self.log_signal.emit("  ⚠️ input[type='file'] 요소를 찾을 수 없습니다.")
                 return False
             
             # 파일 경로 전송
-            file_input[0].send_keys(file_path)
-            self.log_signal.emit("  ⏳ 이미지 업로드 처리 대기 (5초)...")
-            time.sleep(5) # 업로드 처리 대기 (User request: 5 seconds)
+            file_input.send_keys(file_path)
+            self.log_signal.emit(f"  ⏳ 이미지 업로드 처리 대기: {os.path.basename(file_path)}")
+            time.sleep(6) # 업로드 처리 대기 (약간 상향)
             
-            # 2. 텍스트 입력의 필요성? (이미지만으로는 버튼 활성화 안될 수도 있음)
-            # 텍스트 입력을 시도
-            # try:
-            #     ta = self.driver.find_element(By.TAG_NAME, 'textarea')
-            #     if ta:
-            #         ta.click()
-            #         time.sleep(0.5)
-            #         # 트리거 텍스트 입력 (아무것도 없으면 전송 안될 수 있음)
-            #         ta.send_keys("Animate this") 
-            #         time.sleep(0.5)
-            # except:
-            #     pass
+            # 2. 텍스트 입력의 필요성 (이미지만으로는 버튼 활성화 안될 수도 있음)
+            try:
+                ta = self.driver.find_element(By.TAG_NAME, 'textarea')
+                if ta:
+                    ta.click()
+                    time.sleep(0.5)
+                    # 트리거 텍스트 입력 (아무것도 없으면 전송 안될 수 있음)
+                    ta.send_keys("Animate this") 
+                    time.sleep(1)
+            except:
+                pass
             
             # 3. 전송 버튼 클릭 시도
             # 전략 A: 엔터키 (가장 흔함)
@@ -874,22 +885,21 @@ class GrokMultiTabWorker(QThread):
             self.log_signal.emit(f"  ⚠️ 업로드 예외: {e}")
             return False
 
-    def check_video_generated(self):
-        """비디오 태그가 생겼는지 확인하고 src 반환"""
+    def check_video_generated(self, old_urls):
+        """비디오 태그가 생겼는지 확인하고, 이전과 다른 src만 반환"""
         try:
             # 비디오 태그 검색
             videos = self.driver.find_elements(By.TAG_NAME, "video")
             for v in videos:
                 src = v.get_attribute("src")
                 if src and src.startswith("http") and not "blob:" in src: 
-                    # blob이면 다운로드가 까다로움. 보통 mp4 링크가 뜸.
-                    # 하지만 스트리밍일 수도 있음.
-                    # 우선 src가 유효한지 체크
-                    return src
-                # Blob URL인 경우 JS로 다운로드 처리 필요... 일단 http 링크 가정
+                    # 이전 목록에 없는 새로운 URL인지 확인
+                    if src not in old_urls:
+                        return src
+                # Blob URL인 경우
                 if src and "blob:" in src:
-                    # Blob 처리 (추후 구현, 일단 반환)
-                    return src
+                    if src not in old_urls:
+                        return src
             return None
         except:
             return None
