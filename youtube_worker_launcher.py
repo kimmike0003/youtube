@@ -28,7 +28,6 @@ class BrowserLauncherWorker(QThread):
                 self.log_signal.emit("🌐 ImageFX용 브라우저를 실행합니다...")
                 user_data = r'C:\sel_chrome_fx'
                 target_url = "https://labs.google/fx/ko/tools/image-fx"
-                target_url = "https://labs.google/fx/ko/tools/image-fx"
                 port = 9223
             elif self.browser_type == 'whisk':
                 self.log_signal.emit("🌐 Whisk AI용 브라우저를 실행합니다...")
@@ -39,7 +38,6 @@ class BrowserLauncherWorker(QThread):
                 self.log_signal.emit("🌐 Grok용 브라우저를 실행합니다...")
                 target_url = "https://grok.com/imagine"
             else:
-                self.log_signal.emit("🌐 브라우저를 실행합니다...")
                 self.log_signal.emit("🌐 브라우저를 실행합니다...")
 
             if not os.path.exists(user_data):
@@ -144,45 +142,67 @@ class BrowserLauncherWorker(QThread):
                 self.finished.emit((None, str(e)))
                 return
             
-            # Ensure 2 tabs - Robust Method
+            # Ensure at least 2 tabs are pointed to the target URL
             try:
-                # Set a page load timeout
                 driver.set_page_load_timeout(10)
                 
-                # Initial Check
-                current_tabs = len(driver.window_handles)
-                self.log_signal.emit(f"   ℹ️ 초기 탭 수: {current_tabs}")
-
-                if current_tabs < 2:
-                    self.log_signal.emit("   ➕ 2번째 탭 생성 시도...")
-                    try:
-                        # Method 1: Selenium 4 Built-in
-                        driver.switch_to.new_window('tab')
-                        driver.get(target_url)
-                    except Exception as e1:
-                        self.log_signal.emit(f"   ⚠️ Method 1 실패 ({e1}), Method 2 시도...")
-                        # Method 2: JavaScript
-                        driver.execute_script(f"window.open('{target_url}', '_blank');")
-                        time.sleep(1)
-                    
-                    time.sleep(1)
-                    
-                    # Re-check
-                    if len(driver.window_handles) < 2:
-                         self.log_signal.emit("   ⚠️ 2번째 탭 감지 실패 -> 강제 생성 (빈 탭)")
-                         driver.execute_script("window.open('');")
-                         time.sleep(1)
-                         # Navigate last tab
-                         if len(driver.window_handles) >= 2:
-                             driver.switch_to.window(driver.window_handles[-1])
-                             try:
-                                 driver.get(target_url)
-                             except:
-                                 pass
-
-                final_count = len(driver.window_handles)
-                self.log_signal.emit(f"   ✅ 최종 탭 수: {final_count}")
+                # 1. 대상 URL이 이미 열려있는 탭 찾기
+                handles = driver.window_handles
+                target_base = target_url.split('?')[0] # 쿼리 제외 베이스 URL
                 
+                genspark_tabs = []
+                for h in handles:
+                    try:
+                        driver.switch_to.window(h)
+                        curr_url = driver.current_url.lower()
+                        t_url_lower = target_url.lower()
+                        
+                        # 도메인 기반 매칭 (리다이렉션 고려)
+                        is_match = False
+                        if "genspark.ai" in t_url_lower and "genspark.ai" in curr_url: is_match = True
+                        elif "labs.google" in t_url_lower and "labs.google" in curr_url: is_match = True
+                        elif "grok.com" in t_url_lower and "grok.com" in curr_url: is_match = True
+                        elif target_base in driver.current_url or target_url in driver.current_url: is_match = True
+                        
+                        if is_match:
+                            genspark_tabs.append(h)
+                    except:
+                        continue
+
+                self.log_signal.emit(f"   ℹ️ 대상 URL 탭 감지: {len(genspark_tabs)}개 (전체: {len(handles)}개)")
+
+                # 2. 부족한 만큼 탭을 확보 (기존 탭 이동 혹은 새 탭 생성)
+                while len(genspark_tabs) < 2:
+                    # 기존 탭 중 대상이 아닌 탭이 있으면 이동
+                    unused_tab = next((h for h in driver.window_handles if h not in genspark_tabs), None)
+                    
+                    if unused_tab:
+                        self.log_signal.emit(f"   🔗 기존 탭({driver.window_handles.index(unused_tab)+1}번)을 대상 URL로 이동합니다.")
+                        driver.switch_to.window(unused_tab)
+                        try:
+                            driver.get(target_url)
+                            genspark_tabs.append(unused_tab)
+                        except:
+                            pass
+                    else:
+                        # 탭이 아예 부족하면 새로 생성
+                        self.log_signal.emit("   ➕ 새 탭을 생성하여 대상 URL을 엽니다.")
+                        try:
+                            # Selenium 4+ 
+                            driver.switch_to.new_window('tab')
+                            driver.get(target_url)
+                            genspark_tabs.append(driver.current_window_handle)
+                        except:
+                            # JS Fallback
+                            driver.execute_script(f"window.open('{target_url}', '_blank');")
+                            time.sleep(1)
+                            genspark_tabs.append(driver.window_handles[-1])
+
+                # 3. GenSparkWorker 등은 window_handles[:2]를 사용하므로, 
+                #    대상 탭이 handles의 앞쪽 2개가 아닐 경우를 대비해 탭 순서(핸들 순서)는 바꿀 수 없지만
+                #    앞쪽 2개 탭을 무조건 대상 URL로 맞춰주는 작업이 필요할 수 있음.
+                self.log_signal.emit(f"   ✅ 최종 대상 탭 확보 완료.")
+
             except Exception as e:
                 self.log_signal.emit(f"   ⚠️ 탭 확인 중 경고 (무시 가능): {e}")
             

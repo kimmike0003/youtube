@@ -1,8 +1,12 @@
+import os
+# Intel Fortran runtime error (200) fix for Windows
+os.environ["FOR_IGNORE_EXCEPTIONS"] = "1"
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
 import sys
 import math
 import requests
 import subprocess
-import os
 import collections
 import base64
 import ftplib
