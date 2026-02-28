@@ -1647,20 +1647,60 @@ class MainApp(QWidget):
         trim_end = self.spin_tts_trim.value() # 트리밍 값
         do_merge = self.chk_merge_mp3_json.isChecked()
 
-        # 파싱 로직: 그룹별로 텍스트 묶기
-        subs_map = self.parse_subtitles(text)
+        # 파싱 로직: 그룹별로 텍스트 묶기 (Strict Validation)
+        # N.{} N-M 원본: ... TTS: ... 형식을 엄격하게 검증
+        blocks = re.split(r'(\d+)\.\s*\{.*?\}', text)
+        if len(blocks) < 3:
+            self.tts_log.append("❌ 형식이 올바르지 않습니다. '1.{} 1-1 원본: ... TTS: ...' 형식이 필요하며, 'N.{}' 항목이 누락되었습니다.")
+            return
+
+        if blocks[0].strip():
+            self.tts_log.append(f"❌ '{blocks[0].strip()[:20]}...' 부분은 올바른 형식이 아닙니다. '1.{{}}' 형식으로 시작해야 합니다.")
+            return
+
+        subs_map = collections.defaultdict(list)
+        for i in range(1, len(blocks), 2):
+            major_id = blocks[i]
+            block_content = blocks[i+1].strip()
+            
+            if not block_content:
+                self.tts_log.append(f"❌ {major_id}.{{}} 하위에 내용이 없습니다.")
+                return
+            
+            # 해당 블록 내에서 "N-M 원본: ... TTS: ..." 패턴을 찾습니다.
+            # re.DOTALL: .이 개행문자 포함, re.IGNORECASE: 대소문자 무시
+            item_pattern = rf'(?:^|\s|\n)({major_id}-\d+)\s*원본:(.*?)\s*TTS:(.*?)(?=(?:^|\s|\n){major_id}-\d+|$)'
+            matches = list(re.finditer(item_pattern, block_content, re.DOTALL | re.IGNORECASE))
+            
+            if not matches:
+                self.tts_log.append(f"❌ {major_id}.{{}} 하위에 '{major_id}-1 원본: ... TTS: ...' 형식이 없습니다.")
+                return
+            
+            for m in matches:
+                original_text = m.group(2).strip()
+                tts_text = m.group(3).strip()
+                
+                # 끝부분의 콤마 제거 로직 유지
+                if original_text.endswith(','): original_text = original_text[:-1].strip()
+                if tts_text.endswith(','): tts_text = tts_text[:-1].strip()
+                
+                subs_map[major_id].append({
+                    "original": original_text,
+                    "tts": tts_text
+                })
+
         tasks = []
+        for major_id, items in subs_map.items():
+            combined_tts = " ".join([item['tts'] for item in items])
+            if combined_tts:
+                filename = f"{major_id}.mp3"
+                tasks.append((combined_tts, filename, items))
         
-        if subs_map:
-            for major_id, items in subs_map.items():
-                combined_tts = " ".join([item['tts'] for item in items])
-                if combined_tts:
-                    filename = f"{major_id}.mp3"
-                    tasks.append((combined_tts, filename, items))
-            self.tts_log.append(f"📋 배치 모드 감지: {len(tasks)}개의 파일 생성 예정")
-        else:
-            # 패턴 없으면 전체 텍스트를 하나로 생성 (기본 파일명 tts_output.mp3)
-            tasks.append((text, "tts_output.mp3", [{"original": text, "tts": text}]))
+        if not tasks:
+            self.tts_log.append("❌ 추출된 유효한 데이터가 없습니다.")
+            return
+
+        self.tts_log.append(f"📋 배치 모드 감지: {len(tasks)}개의 파일 생성 예정")
 
         self.btn_generate_tts.setEnabled(False)
         self.btn_stop_tts.setEnabled(True)
