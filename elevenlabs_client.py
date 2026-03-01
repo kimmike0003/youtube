@@ -138,8 +138,7 @@ class ElevenLabsClient:
             os.makedirs(output_dir, exist_ok=True)
 
         try:
-            # [calm, steady tone] 프롬프트가 포함될 수 있는 text 사용
-            # convert_with_timestamps를 직접 호출 (with_raw_response 제거)
+            # v3 모델에 최적화된 표준 호출 방식으로 복구
             response = self.client.text_to_speech.convert_with_timestamps(
                 text=text,
                 voice_id=voice_id,
@@ -153,13 +152,14 @@ class ElevenLabsClient:
                 }
             )
             
-            # request-id는 기본 호출에서는 직접 가져오기 어려울 수 있으나, 
-            # 현재 로직에서 필수가 아니므로 None으로 처리하거나 속성이 있으면 가져옴
-            current_request_id = getattr(response, "request_id", None)
-            
             # 응답 객체에서 직접 속성 추출
+            # v3 모델에서는 audio_base_64(언더바) 형식을 주로 사용합니다.
             audio_raw = getattr(response, "audio_base_64", None) or getattr(response, "audio_base64", None)
             alignment = getattr(response, "alignment", None)
+            
+            # request_id 추출 (객체에 없을 경우 대비하여 None 처리)
+            # ElevenLabs v3 SDK는 응답 객체에 request_id가 직접 포함될 수 있습니다.
+            current_request_id = getattr(response, "request_id", None)
 
             if audio_raw is None:
                 raise AttributeError(f"Could not find audio data in response: {response}")

@@ -1737,7 +1737,7 @@ class MainApp(QWidget):
                         filename=filename,
                         custom_dir=custom_dir,
                         sub_segments=sub_segments,
-                        previous_request_ids=request_ids # 연속성 로직 복구
+                        previous_request_ids=request_ids[-3:] if request_ids else None # 연속성 로직: 최근 3개만 유지
                     )
                     
                     if current_rid:
