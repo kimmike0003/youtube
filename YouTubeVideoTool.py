@@ -1690,12 +1690,21 @@ class MainApp(QWidget):
                 })
 
         tasks = []
+        oversized_tasks = []
         for major_id, items in subs_map.items():
             combined_tts = " ".join([item['tts'] for item in items])
             if combined_tts:
+                if len(combined_tts) > 2300:
+                    oversized_tasks.append(f"{major_id}.mp3 ({len(combined_tts)}자)")
                 filename = f"{major_id}.mp3"
                 tasks.append((combined_tts, filename, items))
         
+        if oversized_tasks:
+            msg = "❌ 다음 파일들의 텍스트가 2300자를 초과합니다. 대본을 더 작게 잘라주세요:\n\n" + "\n".join(oversized_tasks)
+            self.tts_log.append(msg)
+            QMessageBox.warning(self, "글자 수 초과", msg)
+            return
+
         if not tasks:
             self.tts_log.append("❌ 추출된 유효한 데이터가 없습니다.")
             return
@@ -3169,7 +3178,7 @@ class MainApp(QWidget):
         config_layout = QHBoxLayout()
         self.spin_split_limit = QSpinBox()
         self.spin_split_limit.setRange(100, 5000)
-        self.spin_split_limit.setValue(800)
+        self.spin_split_limit.setValue(2300)
         self.spin_split_limit.setSuffix(" 자")
         config_layout.addWidget(QLabel("기준 글자 수:"))
         config_layout.addWidget(self.spin_split_limit)
