@@ -179,6 +179,10 @@ class VideoMergerWorker(QThread):
 
     def process_single_video(self, task):
         img_path, audio_path, output_path, base_name, task_effect_config = task
+
+        # [Fix] Move effect config up to avoid UnboundLocalError
+        effect_config = task_effect_config if task_effect_config else getattr(self, 'effect_config', None)
+        effect_type = effect_config.get('type', 0) if effect_config else 0
         
         # [Fix] 고유 임시 디렉토리 생성 (충돌 방지 및 안전한 삭제)
         temp_dir = os.path.join(os.path.dirname(output_path), f"temp_{base_name}_{int(time.time())}_{os.getpid()}")
@@ -409,13 +413,11 @@ class VideoMergerWorker(QThread):
                 
             if final_img_concat_path:
                 command.extend(["-f", "concat", "-safe", "0", "-i", final_img_concat_path])
-            elif is_video_input and os.path.exists(img_path):
-                 # Video Input Mode: Loop infinitely, will be trimmed by -t at output
-                 command.extend(["-stream_loop", "-1", "-i", img_path])
             elif img_path and os.path.exists(img_path) and img_path != "MULTI_IMAGE_MODE":
-                command.extend(["-loop", "1", "-framerate", "30", "-t", f"{final_duration:.6f}", "-i", img_path])
+                # [Stability Fix] Always use loop 1 for stability when a single image is the source
+                command.extend(["-loop", "1", "-framerate", f"{FPS}", "-t", f"{final_duration:.6f}", "-i", img_path])
             else:
-                # 검정 배경 생성 (lavfi color filter 사용)
+                # 검정 배경 생성
                 command.extend(["-f", "lavfi", "-i", f"color=c=black:s={TARGET_W}x{TARGET_H}:r={FPS}:d={final_duration:.6f}"])
             
             # [Input 1] 오디오
@@ -463,13 +465,8 @@ class VideoMergerWorker(QThread):
             filter_complex = ""
             
             # ========== Video Filter ==========
-            # Effect Config 확인
-            effect_config = task_effect_config if task_effect_config else getattr(self, 'effect_config', None)
-            effect_type = effect_config.get('type', 0) if effect_config else 0
-            
             if effect_config:
-                self.log_signal.emit(f"   🚀 [Ultra-Smooth] Applying 8K Supersampling Effect: {effect_type}")
-                pass
+                self.log_signal.emit(f"   🚀 [Ultra-Smooth] Applying Zoom/Pan Effect: {effect_type}")
             
             filter_parts = []
             if final_img_concat_path:
@@ -487,7 +484,11 @@ class VideoMergerWorker(QThread):
             elif img_path and os.path.exists(img_path) and img_path != "MULTI_IMAGE_MODE":
                 # Effect Config (Zoom/Pan)
                 # [Anti-Jitter] Moderate (2K) Supersampling inside zoompan
-                SUPER_W, SUPER_H = 2560, 1440
+                # [Fix] Use SUPER resolution for zoompan input to avoid quality loss and initialization errors
+                if self.is_shorts:
+                    SUPER_W, SUPER_H = 1440, 2560
+                else:
+                    SUPER_W, SUPER_H = 2560, 1440
                 
                 # Zoom/Pan Expression
                 start_scale = effect_config.get('start_scale', 1.0) if effect_config else 1.0
@@ -495,34 +496,44 @@ class VideoMergerWorker(QThread):
                 total_frames = int(final_duration * FPS)
                 if total_frames <= 0: total_frames = 1
                 
+                denom = total_frames - 1 if total_frames > 1 else 1
+                progress_step = (end_scale - start_scale) / denom
+
                 z_expr = "1"; x_expr = "0"; y_expr = "0"
                 if effect_type == 1: # Zoom (Unified)
-                    denom = total_frames - 1 if total_frames > 1 else 1
-                    # Use a stable progress multiplier, start from start_scale to end_scale
-                    progress_step = (end_scale - start_scale) / denom * 0.25
-                    z_expr = f"{start_scale}+(on*{progress_step})"
-                    x_expr = "(iw-iw/z)/2"
-                    y_expr = "(ih-ih/z)/2"
+                    z_expr = f"{start_scale:.4f}+(on*{progress_step:.10f})"
+                    x_expr = "(iw-iw/zoom)/2"
+                    y_expr = "(ih-ih/zoom)/2"
                 elif effect_type == 2: # Pan Left -> Right
                     pan_z = max(start_scale, 1.05)
                     p_speed = effect_config.get('pan_speed', 1.0) * 0.15
-                    z_expr = f"{pan_z}"
-                    denom = total_frames - 1 if total_frames > 1 else 1
-                    x_step = ((1.0-1.0/pan_z)*iw) / denom * p_speed
-                    x_expr = f"min(on*{x_step}, iw-iw/z)"
-                    y_expr = "ih/2-(ih/z/2)"
+                    z_expr = f"{pan_z:.4f}"
+                    # Use SUPER_W for step calculation since input to zoompan will be SUPER_W
+                    x_step = ((1.0-1.0/pan_z)*SUPER_W) / denom * p_speed
+                    x_expr = f"on*{x_step:.10f}"
+                    y_expr = "(ih-ih/zoom)/2"
                 elif effect_type == 3: # Pan Right -> Left
                     pan_z = max(start_scale, 1.05)
                     p_speed = effect_config.get('pan_speed', 1.0) * 0.15
-                    z_expr = f"{pan_z}"
-                    denom = total_frames - 1 if total_frames > 1 else 1
-                    x_step = ((1.0-1.0/pan_z)*iw) / denom * p_speed
-                    x_expr = f"max((iw-iw/z)-(on*{x_step}), 0)"
-                    y_expr = "ih/2-(ih/z/2)"
+                    z_expr = f"{pan_z:.4f}"
+                    x_step = ((1.0-1.0/pan_z)*SUPER_W) / denom * p_speed
+                    x_expr = f"(iw-iw/zoom)-(on*{x_step:.10f})"
+                    y_expr = "(ih-ih/zoom)/2"
                 
-                filter_parts.append(f"[0:v]trim=start_frame=0:end_frame=1,zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d={total_frames}:s={SUPER_W}x{SUPER_H}:fps={FPS}[v_zoomed]")
-                # 최종적으로 2K에서 1080p로 다운스케일
-                filter_parts.append(f"[v_zoomed]scale={TARGET_W}:{TARGET_H}:force_original_aspect_ratio=decrease:flags=lanczos,pad={TARGET_W}:{TARGET_H}:(ow-iw)/2:(oh-ih)/2,setsar=1:1[v_bg]")
+                # [Stability Fix] Boundary Protection
+                # 1. Use zoom instead of z for boundaries in expressions
+                # 2. Subtract 1 pixel from boundary to avoid float precision issues (trunc(iw-iw/zoom-1))
+                # 3. Force yuv444p before zoompan for maximum stability and color accuracy
+                final_z = f"max(1.001,{z_expr})"
+                final_x = f"max(0,min(trunc({x_expr}),max(0,trunc(iw-iw/zoom-1))))"
+                final_y = f"max(0,min(trunc({y_expr}),max(0,trunc(ih-ih/zoom-1))))"
+
+                # 1. Pre-scale to SUPER resolution and Format to yuv444p for zoompan stability
+                filter_parts.append(f"[0:v]fps={FPS},scale={SUPER_W}:{SUPER_H}:force_original_aspect_ratio=increase,crop={SUPER_W}:{SUPER_H},setsar=1,format=yuv444p[v_pre]")
+                # 2. Zoompan with d=1 (process per-frame mode, outputting to TARGET resolution)
+                filter_parts.append(f"[v_pre]zoompan=z='{final_z}':x='{final_x}':y='{final_y}':d=1:s={TARGET_W}x{TARGET_H}:fps={FPS}[v_zoomed]")
+                # 3. Output stabilization to yuv420p for final encoding
+                filter_parts.append(f"[v_zoomed]fps={FPS},format=yuv420p,scale={TARGET_W}:{TARGET_H},setsar=1[v_bg]")
             else:
                 filter_parts.append(f"[0:v]fps={FPS},setsar=1:1[v_bg]")
             
