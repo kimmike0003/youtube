@@ -586,6 +586,10 @@ class GrokMultiTabWorker(QThread):
                         # 숫자로 된 파일만 대상
                         name_no_ext = os.path.splitext(f)[0]
                         if name_no_ext.isdigit():
+                            # [Optimization] 이미 mp4 파일이 있으면 건너뜀
+                            mp4_path = os.path.join(self.input_dir, name_no_ext + ".mp4")
+                            if os.path.exists(mp4_path):
+                                continue
                             files.append(os.path.join(self.input_dir, f))
             
             # 숫자 기준 정렬
@@ -603,130 +607,143 @@ class GrokMultiTabWorker(QThread):
                  time.sleep(1)
             
             tabs = self.driver.window_handles[:2]
-            wait = WebDriverWait(self.driver, 20)
-            
-            total = len(files)
-            tab_status = {t: None for t in tabs} # {tab: {'file': path, 'start_time': t, 'step': 'uploading'|'generating'}}
-            
-            processed_count = 0
-            file_idx = 0
-            failed_items = []
             
             success_count = 0
-
+            final_failed_items = []
+            
+            # 작업 대상 목록 초기화
+            remaining_files = files[:] 
+            
             self.is_running = True
-            while processed_count < total and self.is_running:
-                for tab in tabs:
-                    if not self.is_running: break
-                    
-                    try:
-                        self.driver.switch_to.window(tab)
-                    except:
-                        continue # 탭이 닫혔을 경우
-
-                    # 1) 작업 할당
-                    if tab_status[tab] is None and file_idx < total:
-                        current_file = files[file_idx]
-                        fname = os.path.basename(current_file)
-                        
-                        self.log_signal.emit(f"▶ [탭 {tabs.index(tab)+1}] {fname} 업로드 시작...")
-                        
-                        # 업로드 로직
-                        if self.upload_image(current_file):
-                            tab_status[tab] = {
-                                "file": current_file, 
-                                "start_time": time.time(),
-                                "step": "generating"
-                            }
-                            file_idx += 1
-                            self.progress.emit(f"진행: {processed_count}/{total}")
-                        else:
-                            self.log_signal.emit(f"❌ [탭 {tabs.index(tab)+1}] {fname} 업로드 실패 -> 스킵")
-                            failed_items.append(current_file)
-                            processed_count += 1 # 실패 처리하고 다음으로 넘어감
-                            file_idx += 1
-
-                    # 2) 진행 상태 확인 및 다운로드
-                    elif tab_status[tab] is not None:
-                        curr = tab_status[tab]
-                        fname = os.path.basename(curr['file'])
-                        
-                        # 타임아웃 체크 (예: 5분)
-                        if time.time() - curr['start_time'] > 300:
-                            self.log_signal.emit(f"❌ [탭 {tabs.index(tab)+1}] {fname} 시간 초과 (5분)")
-                            failed_items.append(curr['file'])
-                            tab_status[tab] = None
-                            processed_count += 1
-                            # 새로고침
-                            self.driver.refresh()
-                            time.sleep(2)
-                            continue
-
-
-                        # 에러 메시지 확인 ("Server failed to respond")
-                        if self.check_error_on_page():
-                             self.log_signal.emit(f"⚠️ [탭 {tabs.index(tab)+1}] {fname} 서버 오류 감지 -> 재시도")
-                             # 재시도를 위해 file_idx를 조정하거나 현재 파일 다시 큐에 넣기
-                             # files 리스트는 유지되므로, file_idx 위치에 다시 insert하면 됨.
-                             # 하지만 file_idx는 이미 증가했으므로, 이 파일을 다시 처리하도록 files의 맨 끝에 넣거나?
-                             # 아니면 file_idx는 그대로 두고 files에 다시 넣어서 처리?
-                             # file_idx는 "다음 처리할 인덱스"이므로, files.insert(file_idx, curr['file']) 하면 됨?
-                             # files = [0, 1, 2, 3], processed=0, idx=1 (processing 0)
-                             # fail 0 -> files.insert(1, 0) -> [0, 0, 1, 2, 3] -> next is 0 again.
-                             # But 0 is still "processing" in tab_status. We clear tab_status.
-                             # Then loop picks up files[1] which is the re-inserted 0. CORRECT.
-                             
-                             # 그러나 무한 루프 방지: 재시도 횟수 제한 필요?
-                             # 일단 간단히 재시도.
-                             files.insert(file_idx, curr['file'])
-                             total += 1 # 전체 작업 수 증가 (재시도니까)
-                             # 혹은 total은 고정하고 processed_count를 늘리지 않음?
-                             # total은 len(files) 초기값이므로... files가 늘어나면 total도 늘어나는게 맞음?
-                             # 아니, while processed_count < total 이므로 total도 늘려줘야 함.
-                             
-                             tab_status[tab] = None
-                             
-                             # 500 에러 등의 경우, 너무 빨리 재시도하면 계속 실패함. 30초 대기
-                             self.log_signal.emit(f"   ⏳ 서버 부하 대기 (30초)...")
-                             time.sleep(30)
-                             
-                             self.driver.refresh() # 에러 상태 해제 위해 새로고침
-                             time.sleep(5)
-                             continue
-
-                        # 다운로드 확인
-                        video_url = self.check_video_generated()
-                        if video_url:
-                            # 다운로드 수행
-                            save_name = os.path.splitext(fname)[0] + ".mp4"
-                            save_path = os.path.join(self.target_dir, save_name)
-                            
-                            self.log_signal.emit(f"📥 [탭 {tabs.index(tab)+1}] {fname} 영상 발견! 다운로드 중...")
-                            if self.download_video(video_url, save_path):
-                                self.log_signal.emit(f"✅ [탭 {tabs.index(tab)+1}] {save_name} 저장 완료")
-                                success_count += 1
-                            else:
-                                self.log_signal.emit(f"❌ [탭 {tabs.index(tab)+1}] {save_name} 다운로드 실패")
-                                failed_items.append(curr['file'])
-                            
-                            # 작업 완료 -> 초기화
-                            # 다음 작업을 위해 페이지 리셋 (새로고침이 가장 깔끔)
-                            self.driver.refresh()
-                            time.sleep(1) # Refresh 대기
-                            
-                            tab_status[tab] = None
-                            processed_count += 1
-                        else:
-                            # 아직 생성 중...
-                            pass
+            
+            # [Added] 2단계 재시도 로직: 1차 생성 -> 실패분 모아서 최종 재시도
+            for pass_num in [1, 2]:
+                if not remaining_files or not self.is_running:
+                    break
                 
-                time.sleep(1)
+                phase_name = "1차" if pass_num == 1 else "최종 재시도"
+                self.log_signal.emit(f"\n🚀 {phase_name} 작업을 시작합니다. (대상: {len(remaining_files)}개)")
+                
+                if pass_num == 2:
+                    # 탭 새로고침하여 깨끗한 상태로 시작
+                    for tab in tabs:
+                        try:
+                            self.driver.switch_to.window(tab)
+                            self.driver.get('https://grok.com/imagine')
+                        except: pass
+                    time.sleep(5)
+
+                current_pass_files = remaining_files[:]
+                remaining_files = [] # 이번 회차 실패분을 담기 위해 초기화
+                
+                total = len(current_pass_files)
+                processed_count = 0
+                file_idx = 0
+                tab_status = {t: None for t in tabs}
+                tab_old_videos = {t: [] for t in tabs}
+                
+                while processed_count < total and self.is_running:
+                    for tab in tabs:
+                        if not self.is_running: break
+                        
+                        try:
+                            self.driver.switch_to.window(tab)
+                        except:
+                            continue # 탭이 닫혔을 경우
+
+                        # 1) 작업 할당
+                        if tab_status[tab] is None and file_idx < total:
+                            current_file = current_pass_files[file_idx]
+                            fname = os.path.basename(current_file)
+                            
+                            self.log_signal.emit(f"▶ [{phase_name}][탭 {tabs.index(tab)+1}] {fname} 업로드 시작...")
+                            
+                            # 업로드 전 기존 영상 목록 저장
+                            tab_old_videos[tab] = self.driver.execute_script("return Array.from(document.querySelectorAll('video')).map(v => v.src);")
+                            
+                            # 업로드 로직
+                            if self.upload_image(current_file):
+                                tab_status[tab] = {
+                                    "file": current_file, 
+                                    "start_time": time.time(),
+                                    "step": "generating"
+                                }
+                                file_idx += 1
+                                self.progress.emit(f"진행({phase_name}): {processed_count}/{total}")
+                            else:
+                                self.log_signal.emit(f"❌ {fname} 업로드 실패")
+                                if pass_num == 1:
+                                    remaining_files.append(current_file)
+                                else:
+                                    final_failed_items.append(current_file)
+                                processed_count += 1
+                                file_idx += 1
+
+                        # 2) 진행 상태 확인 및 다운로드
+                        elif tab_status[tab] is not None:
+                            curr = tab_status[tab]
+                            file_path = curr['file']
+                            fname = os.path.basename(file_path)
+                            
+                            # 타임아웃 체크 (5분)
+                            if time.time() - curr['start_time'] > 300:
+                                self.log_signal.emit(f"❌ {fname} 시간 초과 (5분)")
+                                if pass_num == 1:
+                                    remaining_files.append(file_path)
+                                else:
+                                    final_failed_items.append(file_path)
+                                    
+                                tab_status[tab] = None
+                                processed_count += 1
+                                self.driver.refresh()
+                                time.sleep(2)
+                                continue
+
+                            # 에러 메시지 확인 ("Server failed to respond")
+                            if self.check_error_on_page():
+                                 self.log_signal.emit(f"⚠️ {fname} 서버 오류 감지 -> 30초 대기 후 재시도")
+                                 # 즉시 동일 회차 내에서 재시도 (항목을 다시 뒤로 보냄)
+                                 current_pass_files.insert(file_idx, file_path)
+                                 total += 1
+                                 
+                                 tab_status[tab] = None
+                                 time.sleep(30)
+                                 self.driver.refresh()
+                                 time.sleep(5)
+                                 continue
+
+                            # 다운로드 확인
+                            video_url = self.check_video_generated(tab_old_videos[tab])
+                            if video_url:
+                                # 다운로드 수행
+                                save_name = os.path.splitext(fname)[0] + ".mp4"
+                                save_path = os.path.join(self.target_dir, save_name)
+                                
+                                self.log_signal.emit(f"📥 {fname} 영상 발견! 다운로드 중...")
+                                if self.download_video(video_url, save_path):
+                                    self.log_signal.emit(f"✅ {save_name} 저장 완료")
+                                    success_count += 1
+                                else:
+                                    self.log_signal.emit(f"❌ {save_name} 다운로드 실패")
+                                    if pass_num == 1:
+                                        remaining_files.append(file_path)
+                                    else:
+                                        final_failed_items.append(file_path)
+                                
+                                # 작업 완료 -> 초기화
+                                self.driver.get('https://grok.com/imagine')
+                                time.sleep(3)
+                                
+                                tab_status[tab] = None
+                                processed_count += 1
+                    
+                    time.sleep(1)
 
             if not self.is_running:
                  self.log_signal.emit("🛑 Grok 작업이 중지되었습니다.")
 
             elapsed_time = time.time() - start_timestamp
-            result_msg = f"완료 (성공 {success_count} / 실패 {len(failed_items)})"
+            result_msg = f"완료 (성공 {success_count} / 최종 실패 {len(final_failed_items)})"
             self.finished.emit(result_msg, elapsed_time)
 
         except Exception as e:
@@ -738,34 +755,40 @@ class GrokMultiTabWorker(QThread):
     def upload_image(self, file_path):
         """grok의 파일 인풋을 찾아 업로드"""
         try:
-            # 0. 혹시 열려있을지 모르는 모달 닫기 (검색창 등)
+            # 0. 혹시 열려있을지 모르는 모달 닫기
             ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
-            time.sleep(0.5)
+            time.sleep(1.5) # 대기 시간 상향
 
-            # 1. Input File 찾기
-            # Grok은 보통 input[type=file]이 hidden 상태임
-            file_input = self.driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
+            # 1. Input File 찾기 (여러 개 있을 경우 대비)
+            file_input = None
+            for _ in range(3): # 최대 3초 대기하며 찾기
+                inputs = self.driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
+                if inputs:
+                    # 가장 마지막에 생성된 input이 현재 활성 상태일 가능성이 높음
+                    file_input = inputs[-1]
+                    break
+                time.sleep(1)
+
             if not file_input:
                 self.log_signal.emit("  ⚠️ input[type='file'] 요소를 찾을 수 없습니다.")
                 return False
             
             # 파일 경로 전송
-            file_input[0].send_keys(file_path)
-            self.log_signal.emit("  ⏳ 이미지 업로드 처리 대기 (5초)...")
-            time.sleep(5) # 업로드 처리 대기 (User request: 5 seconds)
+            file_input.send_keys(file_path)
+            self.log_signal.emit(f"  ⏳ 이미지 업로드 처리 대기: {os.path.basename(file_path)}")
+            time.sleep(6) # 업로드 처리 대기 (약간 상향)
             
-            # 2. 텍스트 입력의 필요성? (이미지만으로는 버튼 활성화 안될 수도 있음)
-            # 텍스트 입력을 시도
-            # try:
-            #     ta = self.driver.find_element(By.TAG_NAME, 'textarea')
-            #     if ta:
-            #         ta.click()
-            #         time.sleep(0.5)
-            #         # 트리거 텍스트 입력 (아무것도 없으면 전송 안될 수 있음)
-            #         ta.send_keys("Animate this") 
-            #         time.sleep(0.5)
-            # except:
-            #     pass
+            # 2. 텍스트 입력의 필요성 (이미지만으로는 버튼 활성화 안될 수도 있음)
+            try:
+                ta = self.driver.find_element(By.TAG_NAME, 'textarea')
+                if ta:
+                    ta.click()
+                    time.sleep(0.5)
+                    # 트리거 텍스트 입력 (아무것도 없으면 전송 안될 수 있음)
+                    ta.send_keys("Animate this") 
+                    time.sleep(1)
+            except:
+                pass
             
             # 3. 전송 버튼 클릭 시도
             # 전략 A: 엔터키 (가장 흔함)
@@ -874,22 +897,21 @@ class GrokMultiTabWorker(QThread):
             self.log_signal.emit(f"  ⚠️ 업로드 예외: {e}")
             return False
 
-    def check_video_generated(self):
-        """비디오 태그가 생겼는지 확인하고 src 반환"""
+    def check_video_generated(self, old_urls):
+        """비디오 태그가 생겼는지 확인하고, 이전과 다른 src만 반환"""
         try:
             # 비디오 태그 검색
             videos = self.driver.find_elements(By.TAG_NAME, "video")
             for v in videos:
                 src = v.get_attribute("src")
                 if src and src.startswith("http") and not "blob:" in src: 
-                    # blob이면 다운로드가 까다로움. 보통 mp4 링크가 뜸.
-                    # 하지만 스트리밍일 수도 있음.
-                    # 우선 src가 유효한지 체크
-                    return src
-                # Blob URL인 경우 JS로 다운로드 처리 필요... 일단 http 링크 가정
+                    # 이전 목록에 없는 새로운 URL인지 확인
+                    if src not in old_urls:
+                        return src
+                # Blob URL인 경우
                 if src and "blob:" in src:
-                    # Blob 처리 (추후 구현, 일단 반환)
-                    return src
+                    if src not in old_urls:
+                        return src
             return None
         except:
             return None
@@ -1114,3 +1136,87 @@ class GrokMultiTabWorker(QThread):
             return False
         except:
             return False
+class WhiskMultiTabWorker(GenSparkMultiTabWorker):
+    def run(self):
+        start_timestamp = time.time()
+        try:
+            if len(self.driver.window_handles) < 2:
+                self.error.emit("❌ 오류: 브라우저 탭이 2개 미만입니다. Whisk 탭을 2개 이상 준비해주세요.")
+                return
+
+            tabs = self.driver.window_handles[:2]
+            wait = WebDriverWait(self.driver, 20)
+
+            total = len(self.items)
+            tab_status = {tabs[0]: None, tabs[1]: None}
+            tab_old_srcs = {tabs[0]: [], tabs[1]: []}
+            
+            processed_count = 0
+            item_idx = 0
+            failed_items = []
+
+            self.is_running = True
+            while processed_count < total and self.is_running:
+                for tab in tabs:
+                    if not self.is_running: break
+                    self.driver.switch_to.window(tab)
+                    
+                    if tab_status[tab] is None and item_idx < total:
+                        current_item = self.items[item_idx]
+                        num, prompt = current_item
+                        self.log_signal.emit(f"▶ [탭 {tabs.index(tab)+1}] {num}번 생성 시작 (Whisk)...")
+                        
+                        tab_old_srcs[tab] = self.driver.execute_script("return Array.from(document.querySelectorAll('img')).map(img => img.src);")
+                        
+                        # Whisk는 구글 랩스 UI이므로 입력창을 신중히 찾음
+                        try:
+                            # 1. textarea 시도
+                            input_box = wait.until(EC.element_to_be_clickable((By.TAG_NAME, "textarea")))
+                        except:
+                            # 2. contenteditable 시도
+                            input_box = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, '[contenteditable="true"]')))
+                            
+                        input_box.click()
+                        time.sleep(0.5)
+                        
+                        # 내용 지우기 및 입력
+                        from selenium.webdriver.common.action_chains import ActionChains
+                        actions = ActionChains(self.driver)
+                        actions.key_down(Keys.CONTROL).send_keys('a').key_up(Keys.CONTROL).send_keys(Keys.BACKSPACE).perform()
+                        
+                        input_box.send_keys(prompt.strip())
+                        time.sleep(1)
+                        
+                        # 엔터 입력 (혹은 전송 버튼 클릭)
+                        input_box.send_keys(Keys.ENTER)
+                        
+                        tab_status[tab] = {"item": current_item, "start_time": time.time()}
+                        item_idx += 1
+                        self.progress.emit(f"진행: {processed_count}/{total}")
+
+                    elif tab_status[tab] is not None:
+                        target_num = tab_status[tab]["item"][0]
+                        img_data = self.check_image_once(self.driver, tab_old_srcs[tab])
+                        
+                        if img_data:
+                            save_path = os.path.join(self.target_dir, f"{target_num}.png")
+                            with open(save_path, "wb") as f:
+                                f.write(base64.b64decode(img_data))
+                            self.log_signal.emit(f"  ✅ [탭 {tabs.index(tab)+1}] {target_num}번 저장 완료")
+                            tab_status[tab] = None
+                            processed_count += 1
+                        
+                        elif time.time() - tab_status[tab]["start_time"] > 180:
+                            self.log_signal.emit(f"  ❌ [탭 {tabs.index(tab)+1}] {target_num}번 타임아웃")
+                            failed_items.append(tab_status[tab]["item"])
+                            tab_status[tab] = None
+                            processed_count += 1
+                
+                time.sleep(1)
+
+            elapsed_time = time.time() - start_timestamp
+            result_msg = f"완료 (성공 {total - len(failed_items)} / 실패 {len(failed_items)})" if self.is_running else "중지됨"
+            self.finished.emit(result_msg, elapsed_time)
+
+        except Exception as e:
+            self.error.emit(str(e))
