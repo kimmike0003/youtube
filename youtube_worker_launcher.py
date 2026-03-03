@@ -142,44 +142,43 @@ class BrowserLauncherWorker(QThread):
                 self.finished.emit((None, str(e)))
                 return
             
-            # Ensure exactly 2 tabs and point them to target URL
+            # Ensure at least 2 tabs and point them to target URL
             try:
-                driver.set_page_load_timeout(15)
+                driver.set_page_load_timeout(20)
                 
-                # 1. 탭 개수 조정 (최소 2개 확보)
-                while len(driver.window_handles) < 2:
+                # 1. 최소 2개의 탭 확보
+                for _ in range(3): # 최대 3번 시도
+                    if len(driver.window_handles) >= 2: break
                     self.log_signal.emit(f"   ➕ 탭 부족 ({len(driver.window_handles)}/2). 새 탭 생성 중...")
-                    driver.switch_to.new_window('tab')
-                    time.sleep(1)
-                
-                # 2. 모든 탭을 순회하며 목표 URL 확인 및 이동
-                handles = driver.window_handles
-                for i, h in enumerate(handles):
-                    if i >= 2: break # 2개까지만 관리
-                    
-                    driver.switch_to.window(h)
-                    curr_url = driver.current_url.lower()
-                    
-                    # 브라우저 유형별 도메인 체크
-                    is_correct_site = False
-                    if "genspark.ai" in target_url and "genspark.ai" in curr_url: is_correct_site = True
-                    elif "grok.com" in target_url and "grok.com" in curr_url: is_correct_site = True
-                    elif "labs.google" in target_url and "labs.google" in curr_url: is_correct_site = True
-                    
-                    if not is_correct_site or "about:blank" in curr_url:
-                        self.log_signal.emit(f"   🌐 [탭 {i+1}] 목표 URL 이동 중...")
+                    try:
+                        driver.switch_to.new_window('tab')
                         driver.get(target_url)
-                        time.sleep(1)
+                    except:
+                        driver.execute_script(f"window.open('{target_url}');")
+                    time.sleep(2)
+                
+                # 2. 모든 탭을 순차적으로 확인하여 목표 URL 설정 (최대 2개까지)
+                final_handles = driver.window_handles
+                for i in range(min(len(final_handles), 2)):
+                    try:
+                        driver.switch_to.window(final_handles[i])
+                        curr_url = driver.current_url.lower()
+                        
+                        # 정확한 도메인 체크 (Grok, GenSpark, Google FX 등)
+                        is_target = any(d in curr_url for d in ["grok.com", "labs.google", "genspark.ai"])
+                        
+                        if not is_target or "about:blank" in curr_url:
+                            self.log_signal.emit(f"   🌐 [탭 {i+1}] 목표 URL 이동 중...")
+                            driver.get(target_url)
+                            time.sleep(1)
+                    except Exception as e_step:
+                        self.log_signal.emit(f"   ⚠️ [탭 {i+1}] 설정 시도 중 알림: {e_step}")
 
-                # 3. 만약 탭이 2개보다 많다면 초과분 정리 (선택 사항)
-                if len(driver.window_handles) > 2:
-                    self.log_signal.emit(f"   🧹 초과 탭({len(driver.window_handles)}개) 정리 중...")
-                    while len(driver.window_handles) > 2:
-                        driver.switch_to.window(driver.window_handles[-1])
-                        driver.close()
+                # 3. 다시 첫 번째 탭으로 포커스 복구
+                if driver.window_handles:
                     driver.switch_to.window(driver.window_handles[0])
 
-                self.log_signal.emit(f"   ✅ 최종 탭 {len(driver.window_handles)}개 확보 및 설정 완료.")
+                self.log_signal.emit(f"   ✅ 최종 작업 탭 {len(driver.window_handles)}개 확보.")
                 
             except Exception as e:
                 self.log_signal.emit(f"   ⚠️ 탭 세팅 중 알림: {e}")
