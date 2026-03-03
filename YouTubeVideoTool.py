@@ -2384,7 +2384,11 @@ class MainApp(QWidget):
             self.table_youtube.setItem(r, 3, make_item(row.get('category', '-'), Qt.AlignCenter))
             
             # 4: Title (Left)
-            self.table_youtube.setItem(r, 4, make_item(row['title'], Qt.AlignLeft | Qt.AlignVCenter))
+            raw_title = row['title']
+            display_title = (raw_title[:30] + '...') if len(raw_title) > 30 else raw_title
+            title_item = make_item(display_title, Qt.AlignLeft | Qt.AlignVCenter)
+            title_item.setToolTip(raw_title) # 전체 제목은 툴팁으로 표시
+            self.table_youtube.setItem(r, 4, title_item)
             
             # 5: Views (Right) - Numeric
             self.table_youtube.setItem(r, 5, make_numeric_item(f"{row['view_count']:,}", Qt.AlignRight | Qt.AlignVCenter))

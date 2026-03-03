@@ -586,6 +586,10 @@ class GrokMultiTabWorker(QThread):
                         # 숫자로 된 파일만 대상
                         name_no_ext = os.path.splitext(f)[0]
                         if name_no_ext.isdigit():
+                            # [Optimization] 이미 mp4 파일이 있으면 건너뜀
+                            mp4_path = os.path.join(self.input_dir, name_no_ext + ".mp4")
+                            if os.path.exists(mp4_path):
+                                continue
                             files.append(os.path.join(self.input_dir, f))
             
             # 숫자 기준 정렬
