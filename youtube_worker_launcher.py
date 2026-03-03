@@ -142,44 +142,44 @@ class BrowserLauncherWorker(QThread):
                 self.finished.emit((None, str(e)))
                 return
             
-            # Ensure 2 tabs - Robust Method
+            # Ensure exactly 2 tabs and point them to target URL
             try:
-                # Set a page load timeout
-                driver.set_page_load_timeout(10)
+                driver.set_page_load_timeout(15)
                 
-                # Initial Check
-                current_tabs = len(driver.window_handles)
-                self.log_signal.emit(f"   ℹ️ 초기 탭 수: {current_tabs}")
-
-                if current_tabs < 2:
-                    self.log_signal.emit("   ➕ 2번째 탭 생성 시도...")
-                    try:
-                        # Method 1: Selenium 4 Built-in
-                        driver.switch_to.new_window('tab')
-                        driver.get(target_url)
-                    except Exception as e1:
-                        self.log_signal.emit(f"   ⚠️ Method 1 실패 ({e1}), Method 2 시도...")
-                        # Method 2: JavaScript
-                        driver.execute_script(f"window.open('{target_url}', '_blank');")
-                        time.sleep(1)
-                    
+                # 1. 탭 개수 조정 (최소 2개 확보)
+                while len(driver.window_handles) < 2:
+                    self.log_signal.emit(f"   ➕ 탭 부족 ({len(driver.window_handles)}/2). 새 탭 생성 중...")
+                    driver.switch_to.new_window('tab')
                     time.sleep(1)
+                
+                # 2. 모든 탭을 순회하며 목표 URL 확인 및 이동
+                handles = driver.window_handles
+                for i, h in enumerate(handles):
+                    if i >= 2: break # 2개까지만 관리
                     
-                    # Re-check
-                    if len(driver.window_handles) < 2:
-                         self.log_signal.emit("   ⚠️ 2번째 탭 감지 실패 -> 강제 생성 (빈 탭)")
-                         driver.execute_script("window.open('');")
-                         time.sleep(1)
-                         # Navigate last tab
-                         if len(driver.window_handles) >= 2:
-                             driver.switch_to.window(driver.window_handles[-1])
-                             try:
-                                 driver.get(target_url)
-                             except:
-                                 pass
+                    driver.switch_to.window(h)
+                    curr_url = driver.current_url.lower()
+                    
+                    # 브라우저 유형별 도메인 체크
+                    is_correct_site = False
+                    if "genspark.ai" in target_url and "genspark.ai" in curr_url: is_correct_site = True
+                    elif "grok.com" in target_url and "grok.com" in curr_url: is_correct_site = True
+                    elif "labs.google" in target_url and "labs.google" in curr_url: is_correct_site = True
+                    
+                    if not is_correct_site or "about:blank" in curr_url:
+                        self.log_signal.emit(f"   🌐 [탭 {i+1}] 목표 URL 이동 중...")
+                        driver.get(target_url)
+                        time.sleep(1)
 
-                final_count = len(driver.window_handles)
-                self.log_signal.emit(f"   ✅ 최종 탭 수: {final_count}")
+                # 3. 만약 탭이 2개보다 많다면 초과분 정리 (선택 사항)
+                if len(driver.window_handles) > 2:
+                    self.log_signal.emit(f"   🧹 초과 탭({len(driver.window_handles)}개) 정리 중...")
+                    while len(driver.window_handles) > 2:
+                        driver.switch_to.window(driver.window_handles[-1])
+                        driver.close()
+                    driver.switch_to.window(driver.window_handles[0])
+
+                self.log_signal.emit(f"   ✅ 최종 탭 {len(driver.window_handles)}개 확보 및 설정 완료.")
                 
             except Exception as e:
                 self.log_signal.emit(f"   ⚠️ 탭 세팅 중 알림: {e}")
