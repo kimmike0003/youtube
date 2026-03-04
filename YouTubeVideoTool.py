@@ -24,7 +24,7 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QTextEdit,
                              QTabWidget, QComboBox, QSlider, QSpinBox, QGroupBox, QDoubleSpinBox, 
                              QFormLayout, QLineEdit, QGridLayout, QCheckBox, QMessageBox, QColorDialog,
                              QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QStackedWidget,
-                             QSizePolicy)
+                             QSizePolicy, QScrollArea, QFrame)
 import json
 import urllib.request
 import urllib.parse
@@ -164,7 +164,7 @@ class MainApp(QWidget):
 
     def initUI(self):
         self.setWindowTitle("YouTube Video Creator Master")
-        self.setGeometry(200, 100, 950, 850) # 폭을 약간 늘림 (2단 탭 버튼 대비)
+        self.setGeometry(100, 50, 1280, 900) # 너비를 1280px로 확대
         layout = QVBoxLayout()
 
         # 메인 레이아웃을 커스텀 탭 위젯으로 변경
@@ -242,20 +242,6 @@ class MainApp(QWidget):
 
 
 
-        # 14. 소설대본
-        self.tab_novel_script = QWidget()
-        self.initTabNovelScript()
-        self.tabs.addTab(self.tab_novel_script, "소설대본")
-
-        # 15. 인트로
-        self.tab_intro = QWidget()
-        self.initTabIntro()
-        self.tabs.addTab(self.tab_intro, "인트로")
-
-        # 16. 소설 썸네일
-        self.tab_novel_thumbnail = QWidget()
-        self.initTabNovelThumbnail()
-        self.tabs.addTab(self.tab_novel_thumbnail, "소설 썸네일")
 
         # 17. YouTube 분석
         self.tab7 = QWidget()
@@ -1441,10 +1427,295 @@ class MainApp(QWidget):
         if path:
             self.atv_dir.setText(path)
             # 폴더 선택 시 결과 파일명을 기본값으로 채워줌
-            default_out = os.path.join(path, "final_video.mp4")
-            self.atv_out_path.setText(default_out)
+            # default_out = os.path.join(path, "final_video.mp4")
+            # self.atv_out_path.setText(default_out)
+            self.refresh_atv_timeline()
 
-    def browse_save_file(self, line_edit, filter_str):
+    def refresh_atv_timeline(self):
+        path = self.atv_dir.text().strip()
+        if not path or not os.path.exists(path): return
+
+        # 기존 씬 초기화 (위젯 및 스페이서 모두 제거)
+        while self.atv_scene_layout.count():
+            item = self.atv_scene_layout.takeAt(0)
+            if item.widget():
+                item.widget().setParent(None)
+        self.atv_scenes_data = []
+
+        # MP3, SRT 파일 체크
+        files = os.listdir(path)
+        srt_files = [f for f in files if f.lower().endswith('.srt')]
+        mp3_files = [f for f in files if f.lower().endswith('.mp3')]
+        
+        self.atv_status_info.setText(f"📂 경로: {os.path.basename(path)} | MP3: {len(mp3_files)}개 | SRT: {len(srt_files)}개 (✅ 준비 완료)")
+        self.atv_status_info.setStyleSheet("color: #4CAF50; font-weight: bold;")
+
+        if not srt_files: return
+
+        # 첫 번째 SRT 파일 파싱
+        srt_path = os.path.join(path, srt_files[0])
+        segments = parse_srt_robust(srt_path)
+
+        # 씬 매칭 및 그룹화 로직
+        current_scene = None
+        last_match = None
+
+        for seg in segments:
+            index = seg['index']
+            # 배경 매칭 시도
+            match_found = None
+            for ext in ['.jpg', '.jpeg', '.png', '.mp4']:
+                tmp = f"{index}{ext}"
+                if tmp in files:
+                    match_found = tmp
+                    break
+            
+            # 만약 현재 세그먼트에 전용 파일이 없고 이전 파일이 있다면 이전 파일 유지 (Hold)
+            if not match_found and last_match:
+                match_found = last_match
+            
+            if match_found: last_match = match_found
+            
+            # 현재 씬과 동일한 배경이면 텍스트 합치기 및 범위 확장
+            if current_scene and current_scene['bg_file'] == match_found:
+                current_scene['end'] = seg['end']
+                current_scene['text'] += " | " + seg['text']
+                current_scene['last_index'] = index
+            else:
+                # 새로운 씬 시작
+                if current_scene:
+                    self.atv_scenes_data.append(current_scene)
+                    self.add_atv_scene_card(current_scene)
+                
+                current_scene = {
+                    'index': index,
+                    'last_index': index,
+                    'start': seg['start'],
+                    'end': seg['end'],
+                    'text': seg['text'],
+                    'bg_file': match_found,
+                    'overlay_file': None,
+                    'speed': 1.0
+                }
+        
+        # 마지막 씬 추가 및 하단 여백용 Stretch
+        if current_scene:
+            self.atv_scenes_data.append(current_scene)
+            self.add_atv_scene_card(current_scene)
+        
+        self.atv_scene_layout.addStretch()
+
+    def add_atv_scene_card(self, item):
+        card = QFrame()
+        card.setFrameShape(QFrame.StyledPanel)
+        card.setStyleSheet("""
+            QFrame { background-color: #1E1E1E; border-radius: 10px; border: 1px solid #333; margin-bottom: 8px; }
+            QFrame:hover { border: 1px solid #4CAF50; background-color: #252525; }
+        """)
+        card_layout = QHBoxLayout()
+        card_layout.setContentsMargins(15, 15, 15, 15)
+        card.setLayout(card_layout)
+
+        # 1. Preview
+        prev_container = QVBoxLayout()
+        lbl_prev = QLabel()
+        lbl_prev.setFixedSize(180, 102) # 16:9 ratio
+        lbl_prev.setStyleSheet("background-color: #000; border-radius: 8px; border: 1px solid #444;")
+        lbl_prev.setAlignment(Qt.AlignCenter)
+        
+        is_video = False
+        bg_path = ""
+        if item['bg_file']:
+            bg_path = os.path.join(self.atv_dir.text(), item['bg_file'])
+            if item['bg_file'].lower().endswith('.mp4'):
+                is_video = True
+                # 비디오 썸네일 추출 시도 (캐시 활용)
+                thumb = self.get_video_thumbnail_sync(bg_path)
+                if thumb and os.path.exists(thumb):
+                    pix = QPixmap(thumb)
+                    if not pix.isNull():
+                        lbl_prev.setPixmap(pix.scaled(180, 102, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                else:
+                    lbl_prev.setText("🎥 VIDEO")
+                    lbl_prev.setStyleSheet("background-color: #0d47a1; color: white; font-weight: bold; border-radius: 8px;")
+            else:
+                pix = QPixmap(bg_path)
+                if not pix.isNull():
+                    lbl_prev.setPixmap(pix.scaled(180, 102, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+        type_label = QLabel("📷 IMAGE" if not is_video else "🎥 VIDEO")
+        type_label.setAlignment(Qt.AlignCenter)
+        type_label.setFixedHeight(22)
+        type_label.setFixedWidth(70)
+        type_label.setStyleSheet(f"background-color: {'#FFC107' if not is_video else '#2196F3'}; color: black; font-weight: bold; font-size: 10px; border-radius: 4px;")
+        
+        prev_container.addWidget(lbl_prev)
+        prev_container.addWidget(type_label, 0, Qt.AlignCenter)
+        card_layout.addLayout(prev_container)
+
+        # 2. Info Content
+        info_layout = QVBoxLayout()
+        info_layout.setSpacing(8)
+        
+        header = QHBoxLayout()
+        scene_range = f"{item['index']}~{item['last_index']}" if item['index'] != item['last_index'] else f"{item['index']}"
+        title = QLabel(f"🎬 Scene {scene_range}")
+        title.setStyleSheet("font-weight: bold; font-size: 15px; color: #FFF;")
+        
+        time_range = QLabel(f"⏱️ {self.format_time_atv(item['start'])} ~ {self.format_time_atv(item['end'])}")
+        time_range.setStyleSheet("color: #9E9E9E; font-family: 'Consolas'; font-size: 12px;")
+        
+        dur = item['end'] - item['start']
+        duration_label = QLabel(f"● {dur:.1f}s")
+        duration_label.setStyleSheet("color: #FFD54F; font-weight: bold; font-size: 12px;")
+
+        header.addWidget(title)
+        header.addSpacing(15)
+        header.addWidget(time_range)
+        header.addStretch()
+        header.addWidget(duration_label)
+        info_layout.addLayout(header)
+
+        # Subtitle Text (Single Line version)
+        raw_text = item['text'].replace('\n', ' ')
+        # 텍스트가 너무 길면 '...'으로 표시 (QLabel의 한계로 수동 절단 대신 텍스트 조정)
+        display_text = raw_text if len(raw_text) < 55 else raw_text[:52] + "..."
+        content = QLabel(display_text)
+        content.setWordWrap(False)
+        content.setFixedHeight(22)
+        content.setStyleSheet("color: #E0E0E0; font-size: 13px; font-weight: 400;")
+        info_layout.addWidget(content)
+
+        # Settings Grid
+        settings_grid = QGridLayout()
+        settings_grid.setColumnStretch(1, 1)
+        
+        # Background Settings
+        settings_grid.addWidget(QLabel("🖼️ 배경:"), 0, 0)
+        edit_bg = QLineEdit(item['bg_file'] or "파일 없음")
+        edit_bg.setReadOnly(True)
+        edit_bg.setMaximumWidth(400) # 너비 제한으로 가로 스크롤 방지
+        edit_bg.setStyleSheet("background-color: #252525; border: 1px solid #333; color: #757575; padding: 3px;")
+        btn_bg = QPushButton("변경")
+        btn_bg.setFixedWidth(75) # 너비 상향 (60 -> 75)
+        btn_bg.setStyleSheet("background-color: #424242; color: #EEE; font-weight: bold;")
+        btn_bg.clicked.connect(lambda: self.change_scene_bg(item, edit_bg, lbl_prev, type_label))
+        settings_grid.addWidget(edit_bg, 0, 1)
+        settings_grid.addWidget(btn_bg, 0, 2)
+
+        # Overlay Settings
+        settings_grid.addWidget(QLabel("🔷 오버레이:"), 1, 0)
+        edit_ov = QLineEdit(item['overlay_file'] or "이미지/영상 PiP 전용...")
+        edit_ov.setReadOnly(True)
+        edit_ov.setMaximumWidth(400) # 너비 제한으로 가로 스크롤 방지
+        edit_ov.setStyleSheet("background-color: #252525; border: 1px solid #333; color: #616161; padding: 3px;")
+        btn_ov = QPushButton("선택")
+        btn_ov.setFixedWidth(65) # 너비 상향 (50 -> 65)
+        btn_ov.setStyleSheet("background-color: #424242; color: #EEE; font-weight: bold;")
+        btn_ov.clicked.connect(lambda: self.change_scene_ov(item, edit_ov))
+        btn_ov_del = QPushButton("X")
+        btn_ov_del.setFixedWidth(35) # 너비 상향 (30 -> 35)
+        btn_ov_del.setStyleSheet("background-color: #D32F2F; color: white; font-weight: bold;")
+        btn_ov_del.clicked.connect(lambda: self.clear_scene_ov(item, edit_ov))
+        
+        settings_grid.addWidget(edit_ov, 1, 1)
+        ov_btns = QHBoxLayout()
+        ov_btns.addWidget(btn_ov)
+        ov_btns.addWidget(btn_ov_del)
+        settings_grid.addLayout(ov_btns, 1, 2)
+
+        if is_video:
+            speed_h = QHBoxLayout()
+            speed_label = QLabel("⏳ 영상 속도:")
+            speed_label.setStyleSheet("font-size: 11px; color: #FFA000;")
+            speed_h.addWidget(speed_label)
+            combo_speed = QComboBox()
+            combo_speed.addItems(["0.5x", "0.8x", "1.0x (기본)", "1.2x", "1.5x", "2.0x"])
+            combo_speed.setCurrentIndex(2)
+            combo_speed.setFixedWidth(100)
+            combo_speed.currentTextChanged.connect(lambda v: self.set_scene_speed(item, v))
+            speed_h.addWidget(combo_speed)
+            speed_h.addStretch()
+            info_layout.addLayout(speed_h)
+
+        info_layout.addLayout(settings_grid)
+        card_layout.addLayout(info_layout, 1)
+        
+        self.atv_scene_layout.addWidget(card)
+
+    def format_time_atv(self, seconds):
+        m, s = divmod(seconds, 60)
+        return f"{int(m):02d}:{s:05.2f}"
+
+    def get_video_thumbnail_sync(self, video_path):
+        import hashlib
+        h = hashlib.md5(video_path.encode()).hexdigest()
+        temp_dir = os.path.join(os.environ.get('TEMP', os.environ.get('TMP', 'C:/Windows/Temp')), "youtube_creator_thumbs")
+        if not os.path.exists(temp_dir): os.makedirs(temp_dir, exist_ok=True)
+        thumb_path = os.path.join(temp_dir, f"thumb_{h}.jpg")
+        
+        if os.path.exists(thumb_path):
+            return thumb_path
+            
+        try:
+            import imageio_ffmpeg
+            ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        except:
+            ffmpeg_exe = "ffmpeg"
+            
+        # 첫 번째 1초 지점의 프레임을 16:9 비율로 추출
+        cmd = [
+            ffmpeg_exe, "-y", "-i", video_path, 
+            "-ss", "00:00:01", "-vframes", "1", 
+            "-vf", "scale=180:102:force_original_aspect_ratio=decrease,pad=180:102:(ow-iw)/2:(oh-ih)/2", 
+            thumb_path
+        ]
+        try:
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=0x08000000, timeout=2)
+            return thumb_path
+        except:
+            return None
+
+    def change_scene_bg(self, item, edit_field, lbl_prev, type_lbl):
+        path, _ = QFileDialog.getOpenFileName(self, "배경 파일 선택", self.atv_dir.text(), "Media Files (*.jpg *.png *.mp4)")
+        if path:
+            fname = os.path.basename(path)
+            item['bg_file'] = fname
+            edit_field.setText(fname)
+            if fname.lower().endswith('.mp4'):
+                lbl_prev.setText("🎥 VIDEO")
+                lbl_prev.setPixmap(QPixmap())
+                lbl_prev.setStyleSheet("background-color: #0d47a1; color: white; font-weight: bold; border-radius: 5px;")
+                type_lbl.setText("🎥 VIDEO")
+                type_lbl.setStyleSheet("background-color: #2196F3; color: black; font-weight: bold; font-size: 10px; border-radius: 3px; max-height: 18px;")
+            else:
+                pix = QPixmap(path)
+                lbl_prev.setPixmap(pix.scaled(160, 90, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                lbl_prev.setStyleSheet("background-color: #000; border-radius: 5px;")
+                type_lbl.setText("📷 IMAGE")
+                type_lbl.setStyleSheet("background-color: #FFC107; color: black; font-weight: bold; font-size: 10px; border-radius: 3px; max-height: 18px;")
+
+    def change_scene_ov(self, item, edit_field):
+        path, _ = QFileDialog.getOpenFileName(self, "오버레이 파일 선택", self.atv_dir.text(), "Media Files (*.jpg *.png *.mp4)")
+        if path:
+            fname = os.path.basename(path)
+            item['overlay_file'] = fname
+            edit_field.setText(fname)
+            edit_field.setStyleSheet("background-color: #121212; border: 1px solid #4CAF50; color: #FFF;")
+
+    def clear_scene_ov(self, item, edit_field):
+        item['overlay_file'] = None
+        edit_field.setText("이미지/영상 PiP 전용...")
+        edit_field.setStyleSheet("background-color: #121212; border: 1px solid #444; color: #555;")
+
+    def set_scene_speed(self, item, val):
+        try:
+            speed = float(val.replace('x', '').replace('(기본)', '').strip())
+            item['speed'] = speed
+        except:
+            item['speed'] = 1.0
+
+    def browse_save_path(self, line_edit, filter_str="Video Files (*.mp4)"):
         path, _ = QFileDialog.getSaveFileName(self, "파일 저장 위치 지정", line_edit.text() or "", filter_str)
         if path:
             line_edit.setText(path)
@@ -1501,15 +1772,6 @@ class MainApp(QWidget):
                 if 'font' in line_data: # 수정: 'font_combo' -> 'font'
                     combos.append(line_data['font'])
         
-        # 인트로 탭 콤보박스 추가
-        if hasattr(self, 'combo_intro_font'):
-            combos.append(self.combo_intro_font)
-
-        # 소설 썸네일 탭 콤보박스 추가
-        if hasattr(self, 'novel_thumb_lines'):
-            for line_data in self.novel_thumb_lines:
-                if 'font' in line_data:
-                    combos.append(line_data['font'])
         
         # 시스템 폰트 경로 보강 (한글 깨짐 방지용)
         sys_fonts = {
@@ -1530,6 +1792,10 @@ class MainApp(QWidget):
                 final_list = sorted(list(matched_families))
                 cb.addItems(final_list)
                 
+                # 영상생성 탭 폰트 개수 정보 업데이트
+                if hasattr(self, 'lbl_atv_font_info'):
+                    self.lbl_atv_font_info.setText(f"폰트 로드 완료: {len(final_list)}개")
+
                 # 우선순위 설정: Gmarket Sans TTF Bold 최우선
                 target_set = False
                 # 1순위: Gmarket Sans TTF Bold (정확한 매칭 시도)
@@ -2540,98 +2806,147 @@ class MainApp(QWidget):
             self.concat_log.append("🛑 중지 요청 중...")
 
     def initTabAudioToVideo(self):
-        layout = QVBoxLayout()
-        layout.addWidget(QLabel("🎬 MP3 + SRT + 이미지/영상을 결합하여 영상을 제작합니다."))
-        
-        # 1. Folder Selection Group
-        dir_group = QGroupBox("작업 환경 설정")
-        dir_layout = QGridLayout()
+        # 메인 레이아웃: 가로 (Sidebar + Timeline)
+        main_layout = QHBoxLayout()
+        self.tab_audio_video.setLayout(main_layout)
+
+        # --- 좌측 사이드바 (설정 영역) ---
+        sidebar_widget = QWidget()
+        sidebar_widget.setFixedWidth(380)
+        sidebar_layout = QVBoxLayout()
+        sidebar_widget.setLayout(sidebar_layout)
+        sidebar_layout.setContentsMargins(0, 0, 10, 0)
+
+        # 1. 사용법 및 폴더 선택
+        usage_label = QLabel("💡 사용법:\n1. 1.mp3, 1.srt 및 배경 파일(1.jpg, 2.mp4...)이 있는 폴더를 선택하세요.\n2. 폰트와 배경음악을 설정한 후 '생성 시작'을 누르세요.")
+        usage_label.setWordWrap(True)
+        usage_label.setStyleSheet("color: #FFD54F; font-size: 11px; margin-bottom: 5px;")
+        sidebar_layout.addWidget(usage_label)
+
+        dir_group = QGroupBox("📁 경로 설정")
+        dir_vbox = QVBoxLayout()
         self.atv_dir = QLineEdit()
+        self.atv_dir.setPlaceholderText("작업 폴더 경로")
+        self.atv_dir.setReadOnly(True)
         btn_dir = QPushButton("작업 폴더 선택")
+        btn_dir.setFixedHeight(45)
+        btn_dir.setStyleSheet("background-color: #0d6efd; color: white; font-weight: bold; font-size: 14px;")
         btn_dir.clicked.connect(self.browse_atv_folder)
         
-        dir_layout.addWidget(QLabel("작업 폴더:"), 0, 0)
-        dir_layout.addWidget(self.atv_dir, 0, 1)
-        dir_layout.addWidget(btn_dir, 0, 2)
-        
-        # [Request] 결과 파일 경로 지정 추가
-        self.atv_out_path = QLineEdit()
-        self.atv_out_path.setPlaceholderText("결과 영상이 저장될 경로와 파일명")
-        btn_out = QPushButton("결과 파일 지정")
-        btn_out.clicked.connect(lambda: self.browse_save_file(self.atv_out_path, "Video Files (*.mp4)"))
-        
-        dir_layout.addWidget(QLabel("결과 파일:"), 1, 0)
-        dir_layout.addWidget(self.atv_out_path, 1, 1)
-        dir_layout.addWidget(btn_out, 1, 2)
-        
-        dir_group.setLayout(dir_layout)
-        layout.addWidget(dir_group)
+        dir_vbox.addWidget(self.atv_dir)
+        dir_vbox.addWidget(btn_dir)
+        dir_group.setLayout(dir_vbox)
+        sidebar_layout.addWidget(dir_group)
 
-        # 2. Subtitle Style Group (Exactly like tab3)
-        style_group = QGroupBox("자막 스타일 설정 (이 탭 전용)")
-        style_layout = QGridLayout()
+        # 2. 스타일 및 음악
+        style_group = QGroupBox("⚙️ 스타일 및 음악")
+        style_grid = QGridLayout()
         
-        # 폰트 폴더
-        self.atv_font_folder_path = QLineEdit(r"D:\youtube\fonts")
-        btn_font_folder = QPushButton("찾기")
-        btn_font_folder.clicked.connect(lambda: self.browse_folder(self.atv_font_folder_path, self.load_custom_fonts))
-        style_layout.addWidget(QLabel("폰트 폴더:"), 0, 0)
-        style_layout.addWidget(self.atv_font_folder_path, 0, 1, 1, 2)
-        style_layout.addWidget(btn_font_folder, 0, 3)
-
-        # 폰트 및 크기
+        # 폰트
         self.atv_combo_font = QComboBox()
         self.atv_spin_font_size = QSpinBox()
         self.atv_spin_font_size.setRange(10, 200)
         self.atv_spin_font_size.setValue(75)
-        style_layout.addWidget(QLabel("폰트 선택:"), 1, 0)
-        style_layout.addWidget(self.atv_combo_font, 1, 1)
-        style_layout.addWidget(QLabel("크기:"), 1, 2)
-        style_layout.addWidget(self.atv_spin_font_size, 1, 3)
+        style_grid.addWidget(QLabel("폰트:"), 0, 0)
+        style_grid.addWidget(self.atv_combo_font, 0, 1)
+        style_grid.addWidget(QLabel("크기:"), 0, 2)
+        style_grid.addWidget(self.atv_spin_font_size, 0, 3)
 
-        # 색상 초기화 (사용자 요청: 검정 글자, 흰색 테두리)
+        # BGM
+        self.atv_bgm_path = QLineEdit()
+        self.atv_bgm_path.setPlaceholderText("배경음악 선택 (필수X)")
+        btn_bgm = QPushButton("찾기")
+        btn_bgm.clicked.connect(lambda: self.browse_single_file(self.atv_bgm_path, "Audio Files (*.mp3 *.wav)"))
+        style_grid.addWidget(QLabel("BGM:"), 1, 0)
+        style_grid.addWidget(self.atv_bgm_path, 1, 1, 1, 2)
+        style_grid.addWidget(btn_bgm, 1, 3)
+
+        # 볼륨 슬라이더
+        self.atv_bgm_volume = QSlider(Qt.Horizontal)
+        self.atv_bgm_volume.setRange(0, 100)
+        self.atv_bgm_volume.setValue(10)
+        self.atv_lbl_volume = QLabel("0.10")
+        self.atv_bgm_volume.valueChanged.connect(lambda v: self.atv_lbl_volume.setText(f"{v/100:.2f}"))
+        style_grid.addWidget(QLabel("볼륨:"), 2, 0)
+        style_grid.addWidget(self.atv_bgm_volume, 2, 1, 1, 2)
+        style_grid.addWidget(self.atv_lbl_volume, 2, 3)
+
+        style_group.setLayout(style_grid)
+        sidebar_layout.addWidget(style_group)
+
+        # 3. 하단 버튼 및 정보
+        self.btn_atv_start = QPushButton("🎬 영상 생성 시작")
+        self.btn_atv_start.setFixedHeight(55)
+        self.btn_atv_start.setStyleSheet("background-color: #6200EA; color: white; font-weight: bold; font-size: 16px; border-radius: 8px;")
+        self.btn_atv_start.clicked.connect(self.start_audio_to_video)
+        sidebar_layout.addWidget(self.btn_atv_start)
+
+        self.atv_status_info = QLabel("📂 경로: - | MP3: 0개 | SRT: 0개")
+        self.atv_status_info.setStyleSheet("color: #FF5252; font-weight: bold; margin-top: 5px;")
+        sidebar_layout.addWidget(self.atv_status_info)
+
+        # 4. 기존 스타일 설정 그룹 복구 (유저 요청: 기존 형태 유지)
+        style_group_ext = QGroupBox("📌 자막 상세 스타일 (기존)")
+        style_layout_ext = QGridLayout()
+
+        # 폰트 폴더 고정 (UI 제거)
+        self.atv_font_folder_path = QLineEdit(r"D:\youtube\fonts")
+        self.atv_font_folder_path.setVisible(False)
+
+        # 색상 초기화
         self.atv_color_text = "black"
         self.atv_color_outline = "white"
         self.atv_color_bg = "Transparent"
 
-        # 글자색
+        # 글자색 및 테두리색 버튼 폭 조정
         self.atv_btn_text_color = QPushButton("글자색")
+        self.atv_btn_text_color.setFixedWidth(85)
         self.atv_btn_text_color.clicked.connect(lambda: self.pick_color('atv_text'))
         self.atv_ind_text_color = QLabel()
         self.atv_ind_text_color.setFixedSize(20, 20)
         
-        # 테두리색
         self.atv_btn_outline_color = QPushButton("테두리색")
+        self.atv_btn_outline_color.setFixedWidth(85)
         self.atv_btn_outline_color.clicked.connect(lambda: self.pick_color('atv_outline'))
         self.atv_ind_outline_color = QLabel()
         self.atv_ind_outline_color.setFixedSize(20, 20)
 
-        # 테두리 사용 체크박스
         self.atv_checkbox_use_outline = QCheckBox("테두리 사용")
         self.atv_checkbox_use_outline.setChecked(True)
         self.atv_checkbox_use_outline.stateChanged.connect(self.update_color_indicators)
 
-        style_layout.addWidget(self.atv_btn_text_color, 2, 0)
-        style_layout.addWidget(self.atv_ind_text_color, 2, 1)
-        style_layout.addWidget(self.atv_btn_outline_color, 2, 2)
-        style_layout.addWidget(self.atv_ind_outline_color, 2, 3)
-        style_layout.addWidget(self.atv_checkbox_use_outline, 2, 4)
+        # 1행 배치
+        row1_h = QHBoxLayout()
+        row1_h.addWidget(self.atv_btn_text_color)
+        row1_h.addWidget(self.atv_ind_text_color)
+        row1_h.addSpacing(10)
+        row1_h.addWidget(self.atv_btn_outline_color)
+        row1_h.addWidget(self.atv_ind_outline_color)
+        row1_h.addSpacing(10)
+        row1_h.addWidget(self.atv_checkbox_use_outline)
+        row1_h.addStretch()
+        style_layout_ext.addLayout(row1_h, 1, 0, 1, 5)
 
         # 배경색 설정
         self.atv_checkbox_use_bg = QCheckBox("배경색 사용")
-        self.atv_checkbox_use_bg.setChecked(False)
         self.atv_checkbox_use_bg.stateChanged.connect(self.update_color_indicators)
         self.atv_btn_bg_color = QPushButton("배경색")
+        self.atv_btn_bg_color.setFixedWidth(85)
         self.atv_btn_bg_color.clicked.connect(lambda: self.pick_color('atv_bg'))
         self.atv_ind_bg_color = QLabel()
         self.atv_ind_bg_color.setFixedSize(20, 20)
 
-        style_layout.addWidget(self.atv_checkbox_use_bg, 3, 0)
-        style_layout.addWidget(self.atv_btn_bg_color, 3, 1)
-        style_layout.addWidget(self.atv_ind_bg_color, 3, 2)
+        # 2행 배치
+        row2_h = QHBoxLayout()
+        row2_h.addWidget(self.atv_checkbox_use_bg)
+        row2_h.addSpacing(10)
+        row2_h.addWidget(self.atv_btn_bg_color)
+        row2_h.addWidget(self.atv_ind_bg_color)
+        row2_h.addStretch()
+        style_layout_ext.addLayout(row2_h, 2, 0, 1, 5)
 
-        # 투명도 및 볼륨
-        style_layout.addWidget(QLabel("배경 투명도:"), 4, 0)
+        # 투명도
+        style_layout_ext.addWidget(QLabel("배경 투명도:"), 3, 0)
         self.atv_slider_bg_opacity = QSlider(Qt.Horizontal)
         self.atv_slider_bg_opacity.setRange(0, 100)
         self.atv_slider_bg_opacity.setValue(80)
@@ -2639,30 +2954,58 @@ class MainApp(QWidget):
         self.atv_slider_bg_opacity.valueChanged.connect(self.update_color_indicators)
         self.atv_slider_bg_opacity.valueChanged.connect(lambda v: self.atv_lbl_bg_opacity.setText(f"{v}%"))
         
-        style_layout.addWidget(self.atv_slider_bg_opacity, 4, 1, 1, 2)
-        style_layout.addWidget(self.atv_lbl_bg_opacity, 4, 3)
+        style_layout_ext.addWidget(self.atv_slider_bg_opacity, 3, 1, 1, 2)
+        style_layout_ext.addWidget(self.atv_lbl_bg_opacity, 3, 3)
 
-        # 랜덤 효과 및 1번 이미지 고정 체크박스 추가
+        # 줌팬 방지
         self.atv_chk_fix_first_img = QCheckBox("1번 이미지 고정 (줌/팬 방지)")
         self.atv_chk_fix_first_img.setChecked(True)
-        style_layout.addWidget(self.atv_chk_fix_first_img, 5, 0, 1, 2)
+        style_layout_ext.addWidget(self.atv_chk_fix_first_img, 4, 0, 1, 2)
 
-        style_group.setLayout(style_layout)
-        layout.addWidget(style_group)
-        
-        # Start Button
-        self.btn_atv_start = QPushButton("🚀 영상 생성 시작")
-        self.btn_atv_start.setStyleSheet("height: 50px; font-weight: bold; background-color: #673AB7; color: white; font-size: 16px;")
-        self.btn_atv_start.clicked.connect(self.start_audio_to_video)
-        layout.addWidget(self.btn_atv_start)
-        
-        # Log
+        style_group_ext.setLayout(style_layout_ext)
+        sidebar_layout.addWidget(style_group_ext)
+
+        # 로그창 복구 (기존 UI 유지)
         self.atv_log = QTextEdit()
         self.atv_log.setReadOnly(True)
-        self.atv_log.setStyleSheet("background-color: #1E1E1E; color: #D4D4D4; font-family: 'Consolas';")
-        layout.addWidget(self.atv_log)
+        self.atv_log.setStyleSheet("background-color: #1E1E1E; color: #D4D4D4;")
+        sidebar_layout.addWidget(self.atv_log, 1) # stretch factor 1 부여
+
+        main_layout.addWidget(sidebar_widget)
+
+        # --- 우측 타임라인 영역 ---
+        timeline_container = QWidget()
+        timeline_layout = QVBoxLayout()
+        timeline_container.setLayout(timeline_layout)
         
-        self.tab_audio_video.setLayout(layout)
+        header_layout = QHBoxLayout()
+        header_title = QLabel("≡ 타임라인 미리보기 (SRT 매칭)")
+        header_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #FFF;")
+        header_layout.addWidget(header_title)
+        header_layout.addStretch()
+        timeline_layout.addLayout(header_layout)
+
+        # 스크롤 영역
+        self.atv_scroll_area = QScrollArea()
+        self.atv_scroll_area.setWidgetResizable(True)
+        self.atv_scroll_area.setStyleSheet("background-color: #121212; border: none;")
+        
+        self.atv_scroll_content = QWidget()
+        self.atv_scene_layout = QVBoxLayout()
+        self.atv_scene_layout.setAlignment(Qt.AlignTop)
+        self.atv_scene_layout.setContentsMargins(10, 10, 10, 30) # 하단 여백 추가 (30px)
+        self.atv_scroll_content.setLayout(self.atv_scene_layout)
+        self.atv_scroll_area.setWidget(self.atv_scroll_content)
+        
+        timeline_layout.addWidget(self.atv_scroll_area)
+        main_layout.addWidget(timeline_container, 1)
+        
+        # 데이터 관리용
+        self.atv_scenes_data = [] # [{index, start, end, text, bg_file, overlay_file, speed}, ...]
+        self.atv_color_text = "black"
+        self.atv_color_outline = "white"
+        self.atv_color_bg = "Transparent"
+        
         # 초기 컬러 인디케이터 갱신
         self.update_color_indicators()
 
@@ -2681,23 +3024,34 @@ class MainApp(QWidget):
             'bg_color': self.atv_color_bg,
             'bg_opacity': int(self.atv_slider_bg_opacity.value() * 2.55),
             'use_bg': self.atv_checkbox_use_bg.isChecked(),
-            'use_outline': self.atv_checkbox_use_outline.isChecked(),
-            'font_folder': self.atv_font_folder_path.text().strip(),
-            'fix_first_img': self.atv_chk_fix_first_img.isChecked() # New Parameter
+            'font_folder': self.atv_font_folder_path.text().strip() if hasattr(self, 'atv_font_folder_path') else '',
+            'fix_first_img': self.atv_chk_fix_first_img.isChecked() if hasattr(self, 'atv_chk_fix_first_img') else True,
+            'bgm_path': self.atv_bgm_path.text().strip(),
+            'bgm_volume': self.atv_bgm_volume.value() / 100.0
         }
         
-        self.atv_log.append(f"🚀 작업 시작: {target_dir}")
+        self.atv_log_append_custom(f"🚀 작업 시작: {target_dir}")
         self.btn_atv_start.setEnabled(False)
         
-        out_path = self.atv_out_path.text().strip()
-        if not out_path:
-            out_path = os.path.join(target_dir, "final_video.mp4")
+        # 결과 파일명을 기본값(final_video.mp4)으로 설정
+        out_path = os.path.join(target_dir, "final_video.mp4")
             
-        self.atv_worker = AudioToVideoWorker(target_dir, style, out_path)
-        self.atv_worker.log_signal.connect(self.atv_log.append)
+        self.atv_worker = AudioToVideoWorker(target_dir, style, out_path, self.atv_scenes_data)
+        self.atv_worker.log_signal.connect(self.atv_log_append_custom) # 사이드바 로그가 없으므로 커스텀 로그 함수 필요
         self.atv_worker.finished.connect(self.on_atv_finished)
         self.atv_worker.error.connect(self.on_atv_error)
         self.atv_worker.start()
+
+    def atv_log_append_custom(self, msg):
+        # 1. 상태바 업데이트
+        if "완료" in msg or "시작" in msg or "실패" in msg or "오류" in msg:
+            self.atv_status_info.setText(f"ℹ️ {msg}")
+        
+        # 2. 로그창 업데이트
+        if hasattr(self, 'atv_log'):
+            self.atv_log.append(f"[{time.strftime('%H:%M:%S')}] {msg}")
+            # 스크롤 최하단으로
+            self.atv_log.ensureCursorVisible()
         
     def on_atv_finished(self, msg, elapsed):
         h = int(elapsed // 3600)
@@ -2705,11 +3059,11 @@ class MainApp(QWidget):
         s = int(elapsed % 60)
         time_str = f" ({h:02d}:{m:02d}:{s:02d})"
         
-        self.atv_log.append(f"🏁 {msg}{time_str}")
+        self.atv_log_append_custom(f"🏁 {msg}{time_str}")
         self.btn_atv_start.setEnabled(True)
         
     def on_atv_error(self, err):
-        self.atv_log.append(f"❌ 오류: {err}")
+        self.atv_log_append_custom(f"❌ 오류: {err}")
         self.btn_atv_start.setEnabled(True)
 
     def on_batch_eff_finished(self, msg, elapsed):
@@ -5262,1053 +5616,8 @@ class MainApp(QWidget):
             except Exception as e:
                 QMessageBox.critical(self, "오류", f"저장 실패: {e}")
 
-    # ========== 소설 썸네일 (Novel Thumbnail) ==========
 
-    def initTabNovelThumbnail(self):
-        layout = QVBoxLayout()
-        
-        # 0. Background Image
-        bg_layout = QHBoxLayout()
-        self.novel_thumb_bg_path = QLineEdit()
-        self.novel_thumb_bg_path.setPlaceholderText("배경 이미지 경로")
-        btn_bg = QPushButton("배경 선택")
-        btn_bg.setStyleSheet("height: 20px; width: 90px;")
-        btn_bg.clicked.connect(lambda: self.browse_single_file(self.novel_thumb_bg_path, "Images (*.png *.jpg *.jpeg)"))
-        bg_layout.addWidget(QLabel("배경:"))
-        bg_layout.addWidget(self.novel_thumb_bg_path)
-        bg_layout.addWidget(btn_bg)
-        
-        self.chk_novel_thumb_gradient = QCheckBox("하단 그라데이션")
-        self.chk_novel_thumb_gradient.setChecked(True)
-        self.chk_novel_thumb_gradient.setStyleSheet("color: white; font-weight: bold;")
-        bg_layout.addWidget(self.chk_novel_thumb_gradient)
-        layout.addLayout(bg_layout)
 
-        # Lines Group
-        self.novel_thumb_lines = []
-        
-        # Default Settings per line (Size, Y-Pos, ColorHex)
-        defaults = [
-            (130, 15, "#FFFFFF"), # Line 1: White, Size 130, Y 15
-            (60, 69, "#FFFF00"),  # Line 2: Yellow, Size 60, Y 69
-            (120, 84, "#FF0000")  # Line 3: Red, Size 120, Y 84
-        ]
-
-        for i in range(3):
-            group = QGroupBox(f"줄 {i+1}")
-            g_layout = QHBoxLayout()
-            
-            text_edit = QLineEdit()
-            text_edit.setPlaceholderText(f"내용 입력 {i+1}")
-            
-            font_combo = QComboBox()
-            font_combo.setMinimumWidth(150)
-            
-            # Copy items & Set Preferred Font
-            if hasattr(self, 'combo_font') and self.combo_font.count() > 0:
-                for j in range(self.combo_font.count()):
-                    font_combo.addItem(self.combo_font.itemText(j))
-                
-                # Try to find 'ChosunKm' or '조선굵은명조'
-                found_idx = -1
-                for j in range(font_combo.count()):
-                    txt = font_combo.itemText(j)
-                    if "ChosunKm" in txt or "조선굵은명조" in txt:
-                        found_idx = j; break
-                
-                if found_idx >= 0:
-                    font_combo.setCurrentIndex(found_idx)
-                else:
-                    font_combo.setCurrentIndex(self.combo_font.currentIndex())
-            
-            def_size, def_y, def_color = defaults[i]
-            
-            size_spin = QSpinBox()
-            size_spin.setRange(10, 500)
-            size_spin.setValue(def_size)
-            size_spin.setSuffix(" px")
-
-            color_btn = QPushButton("색상")
-            color_btn.current_color = def_color
-            bg_c = QColor(def_color)
-            text_c = 'black' if bg_c.lightness() > 128 else 'white'
-            color_btn.setStyleSheet(f"background-color: {def_color}; color: {text_c}; font-weight: bold; height: 20px; width: 90px;")
-            color_btn.clicked.connect(lambda checked, b=color_btn: self.pick_color_btn(b))
-            
-            y_spin = QSpinBox()
-            y_spin.setRange(0, 100)
-            y_spin.setValue(def_y)
-            y_spin.setSuffix(" %")
-
-            g_layout.addWidget(QLabel("텍스트:"))
-            g_layout.addWidget(text_edit, 3)
-            g_layout.addWidget(QLabel("폰트:"))
-            g_layout.addWidget(font_combo, 2)
-            g_layout.addWidget(QLabel("크기:"))
-            g_layout.addWidget(size_spin, 1)
-            g_layout.addWidget(color_btn, 1)
-            g_layout.addWidget(QLabel("Y위치:"))
-            g_layout.addWidget(y_spin, 1)
-            
-            group.setLayout(g_layout)
-            layout.addWidget(group)
-            
-            self.novel_thumb_lines.append({
-                'text': text_edit,
-                'font': font_combo,
-                'size': size_spin,
-                'color_btn': color_btn,
-                'y_pos': y_spin
-            })
-            
-        # Preview & Action
-        btn_layout = QHBoxLayout()
-        btn_gen = QPushButton("🔄 미리보기/생성")
-        btn_gen.clicked.connect(self.generate_novel_thumbnail)
-        btn_gen.setStyleSheet("height: 40px; background-color: #673AB7; color: white; font-weight: bold;")
-        
-        btn_save = QPushButton("💾 저장")
-        btn_save.clicked.connect(self.save_novel_thumbnail)
-        btn_save.setStyleSheet("height: 40px; background-color: #28a745; color: white; font-weight: bold;")
-        
-        btn_layout.addWidget(btn_gen)
-        btn_layout.addWidget(btn_save)
-        layout.addLayout(btn_layout)
-        
-        self.novel_thumb_preview_label = QLabel()
-        self.novel_thumb_preview_label.setAlignment(Qt.AlignCenter)
-        self.novel_thumb_preview_label.setStyleSheet("border: 2px dashed #555; background-color: #222;")
-        self.novel_thumb_preview_label.setMinimumHeight(400)
-        self.novel_thumb_preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        layout.addWidget(self.novel_thumb_preview_label)
-        
-        self.current_novel_thumb_image = None
-        self.tab_novel_thumbnail.setLayout(layout)
-
-    def generate_novel_thumbnail(self):
-        bg_path = self.novel_thumb_bg_path.text().strip()
-        width, height = 1280, 720
-        
-        try:
-            if bg_path and os.path.exists(bg_path):
-                base_img = Image.open(bg_path).convert("RGBA")
-                base_img = base_img.resize((width, height), Image.LANCZOS)
-            else:
-                base_img = Image.new("RGBA", (width, height), (0, 0, 0, 255))
-            
-            if self.chk_novel_thumb_gradient.isChecked():
-                grad_height = int(height * 0.7)
-                alpha_mask = Image.new('L', (1, grad_height), 0)
-                for y in range(grad_height):
-                    alpha = int(255 * (y / grad_height))
-                    alpha_mask.putpixel((0, y), alpha)
-                alpha_mask = alpha_mask.resize((width, grad_height))
-                black_layer = Image.new("RGBA", (width, grad_height), "black")
-                black_layer.putalpha(alpha_mask)
-                overlay = Image.new("RGBA", (width, height), (0,0,0,0))
-                overlay.paste(black_layer, (0, height - grad_height))
-                base_img = Image.alpha_composite(base_img, overlay)
-
-            draw = ImageDraw.Draw(base_img)
-            
-            # Left Margin
-            x_margin = 35
-            
-            for item in self.novel_thumb_lines:
-                text = item['text'].text().strip()
-                if not text: continue
-                
-                font_name = item['font'].currentText()
-                font_size = item['size'].value()
-                color_hex = item['color_btn'].current_color
-                y_percent = item['y_pos'].value()
-                
-                font = None
-                if font_name in self.font_path_map:
-                    try:
-                        font = ImageFont.truetype(self.font_path_map[font_name], font_size)
-                    except: pass
-                
-                if font is None:
-                    try: font = ImageFont.truetype(r"C:\Windows\Fonts\malgunbd.ttf", font_size)
-                    except:
-                        try: font = ImageFont.truetype("arial.ttf", font_size)
-                        except: font = ImageFont.load_default()
-                
-                try:
-                    left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
-                    text_w = right - left
-                    text_h = bottom - top
-                except:
-                    text_w, text_h = draw.textsize(text, font=font)
-                
-                # Novel Style: Left Aligned
-                x_pos = x_margin
-                y_pos = (height * (y_percent / 100.0)) - (text_h / 2)
-                
-                stroke_width = max(2, int(font_size / 15))
-                stroke_color = "black" if color_hex.lower() != "#000000" else "white"
-                
-                draw.text((x_pos, y_pos), text, font=font, fill=color_hex, stroke_width=stroke_width, stroke_fill=stroke_color)
-                
-            self.current_novel_thumb_image = base_img
-            
-            data = base_img.tobytes("raw", "RGBA")
-            qim = QImage(data, width, height, QImage.Format_RGBA8888)
-            pixmap = QPixmap.fromImage(qim)
-            scaled_pixmap = pixmap.scaled(self.novel_thumb_preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            self.novel_thumb_preview_label.setPixmap(scaled_pixmap)
-            
-        except Exception as e:
-            QMessageBox.critical(self, "오류", f"소설 썸네일 생성 중 오류: {e}")
-            traceback.print_exc()
-
-    def save_novel_thumbnail(self):
-        if self.current_novel_thumb_image is None:
-            QMessageBox.warning(self, "경고", "먼저 썸네일을 생성해주세요.")
-            return
-            
-        path, _ = QFileDialog.getSaveFileName(self, "소설 썸네일 저장", "", "PNG Files (*.png);;JPG Files (*.jpg)")
-        if path:
-            try:
-                self.current_novel_thumb_image.save(path)
-                QMessageBox.information(self, "완료", f"저장되었습니다:\n{path}")
-            except Exception as e:
-                QMessageBox.critical(self, "오류", f"저장 실패: {e}")
-
-    # ========== 소설대본 (Novel Script) ==========
-
-    def initTabNovelScript(self):
-        self.current_novel_page = 1
-        self.novel_items_per_page = 20
-        
-        self.novel_tab_layout = QVBoxLayout()
-        self.novel_stack = QStackedWidget()
-        
-        # --- Page 1: List ---
-        self.novel_list_page = QWidget()
-        list_layout = QVBoxLayout()
-        
-        # Header Controls
-        search_layout = QHBoxLayout()
-        self.edit_novel_search = QLineEdit()
-        self.edit_novel_search.setPlaceholderText("제목 또는 소제목으로 검색 (Title or Arc Title)")
-        self.edit_novel_search.returnPressed.connect(self.load_novel_list)
-        
-        btn_search = QPushButton("검색")
-        btn_search.setFixedWidth(80)
-        btn_search.clicked.connect(self.load_novel_list)
-        
-        btn_refresh = QPushButton("새로고침")
-        btn_refresh.setFixedWidth(80)
-        btn_refresh.clicked.connect(self.load_novel_list)
-        
-        btn_new = QPushButton("신규 등록")
-        btn_new.setFixedWidth(120)
-        btn_new.setStyleSheet("background-color: #28a745; color: white; font-weight: bold;")
-        btn_new.clicked.connect(lambda: self.switch_to_novel_form(None, None))
-        
-        search_layout.addWidget(self.edit_novel_search)
-        search_layout.addWidget(btn_search)
-        search_layout.addWidget(btn_refresh)
-        search_layout.addWidget(btn_new)
-        list_layout.addLayout(search_layout)
-        
-        # Table
-        self.novel_table = QTableWidget()
-        self.novel_table.setColumnCount(9)
-        self.novel_table.setHorizontalHeaderLabels([
-            "Novel ID", "Arc ID", "No", "Title", "Subtitle", "Genre", "Target", "Arc Title", "Created"
-        ])
-        self.novel_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.novel_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.novel_table.cellDoubleClicked.connect(self.on_novel_cell_double_click)
-        
-        header = self.novel_table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.Interactive) # Title
-        header.setSectionResizeMode(6, QHeaderView.Stretch) # Arc Title stretch
-        
-        self.novel_table.setStyleSheet("""
-            QTableWidget { background-color: #2b2b2b; color: #d4d4d4; gridline-color: #444; }
-            QHeaderView::section { background-color: #333333; color: #ffffff; padding: 4px; border: 1px solid #444; }
-        """)
-        list_layout.addWidget(self.novel_table)
-        
-        # Pagination
-        pagination_layout = QHBoxLayout()
-        self.btn_novel_prev = QPushButton("◀ 이전")
-        self.btn_novel_prev.clicked.connect(lambda: self.change_novel_page(-1))
-        
-        self.lbl_novel_page_info = QLabel("1 / 1")
-        self.lbl_novel_page_info.setAlignment(Qt.AlignCenter)
-        self.lbl_novel_page_info.setMinimumWidth(100)
-        self.lbl_novel_page_info.setStyleSheet("color: white; font-weight: bold;")
-        
-        self.btn_novel_next = QPushButton("다음 ▶")
-        self.btn_novel_next.clicked.connect(lambda: self.change_novel_page(1))
-        
-        pagination_layout.addStretch()
-        pagination_layout.addWidget(self.btn_novel_prev)
-        pagination_layout.addWidget(self.lbl_novel_page_info)
-        pagination_layout.addWidget(self.btn_novel_next)
-        pagination_layout.addStretch()
-        list_layout.addLayout(pagination_layout)
-        
-        self.novel_list_page.setLayout(list_layout)
-        self.novel_stack.addWidget(self.novel_list_page)
-        
-        # --- Page 2: Form ---
-        self.novel_form_page = QWidget()
-        form_wrapper = QVBoxLayout()
-        
-        f_group = QGroupBox("소설 회차 정보 입력/수정")
-        grid = QGridLayout()
-        grid.setSpacing(5)
-        grid.setContentsMargins(10, 5, 10, 5)
-        self.combo_arc_novel = QComboBox()
-        self.combo_arc_novel.currentIndexChanged.connect(self.on_novel_selection_changed)
-        self.edit_arc_no = QLineEdit()
-        self.edit_arc_title = QLineEdit()
-        
-        self.txt_arc_content = QTextEdit()
-        self.txt_arc_content.setMinimumHeight(130)
-        self.txt_arc_content.setMaximumHeight(200)
-        self.txt_arc_content.setPlaceholderText("본문 내용을 입력하세요.")
-        
-        self.txt_arc_srt = QTextEdit()
-        self.txt_arc_srt.setMinimumHeight(130)
-        self.txt_arc_srt.setMaximumHeight(200)
-        self.txt_arc_srt.setPlaceholderText("SRT 자막 내용을 입력하세요.")
-        
-        self.txt_arc_next = QTextEdit()
-        self.txt_arc_next.setMaximumHeight(60)
-        self.txt_arc_prompt = QTextEdit()
-        self.txt_arc_prompt.setMinimumHeight(100)
-        
-        self.lbl_novel_id_val = QLabel("-")
-        self.lbl_arc_id_val = QLabel("-")
-        
-        grid.addWidget(QLabel("Novel ID:"), 0, 0)
-        grid.addWidget(self.lbl_novel_id_val, 0, 1)
-        grid.addWidget(QLabel("Arc ID:"), 0, 2)
-        grid.addWidget(self.lbl_arc_id_val, 0, 3)
-        
-        grid.addWidget(QLabel("소설 선택:"), 1, 0)
-        grid.addWidget(self.combo_arc_novel, 1, 1, 1, 3)
-        
-        grid.addWidget(QLabel("회차 번호:"), 2, 0)
-        grid.addWidget(self.edit_arc_no, 2, 1, 1, 3)
-        
-        grid.addWidget(QLabel("회차 제목:"), 3, 0)
-        grid.addWidget(self.edit_arc_title, 3, 1, 1, 3)
-        
-        grid.addWidget(QLabel("본문 내용:"), 4, 0)
-        grid.addWidget(self.txt_arc_content, 4, 1, 1, 3)
-
-        grid.addWidget(QLabel("SRT 자막:"), 5, 0)
-        grid.addWidget(self.txt_arc_srt, 5, 1, 1, 3)
-        
-        grid.addWidget(QLabel("이미지 프롬프트:"), 6, 0)
-        grid.addWidget(self.txt_arc_prompt, 6, 1, 1, 3)
-
-        grid.addWidget(QLabel("다음편 예고:"), 7, 0)
-        grid.addWidget(self.txt_arc_next, 7, 1, 1, 3)
-        
-        f_group.setLayout(grid)
-        form_wrapper.addWidget(f_group)
-
-        # --- File Upload Section (Audio & SRT) ---
-        upload_section = QVBoxLayout()
-        upload_section.setSpacing(10)
-        
-        # 1. Audio Upload
-        self.audio_group = QGroupBox("오디오 파일 업로드 (Audio Upload)")
-        self.audio_group.setStyleSheet("QGroupBox { font-weight: bold; color: #3498db; }")
-        a_layout = QHBoxLayout()
-        self.edit_novel_audio_path = QLineEdit()
-        self.edit_novel_audio_path.setPlaceholderText("파일 선택 (.mp3...)")
-        btn_a_sel = QPushButton("선택")
-        btn_a_sel.setFixedWidth(90)
-        btn_a_sel.setStyleSheet("height: 20px;")
-        btn_a_sel.clicked.connect(lambda: self.browse_single_file(self.edit_novel_audio_path, "Audio Files (*.mp3 *.wav)"))
-        
-        btn_a_up = QPushButton("업로드")
-        btn_a_up.setFixedWidth(90)
-        btn_a_up.setStyleSheet("background-color: #6f42c1; color: white; font-weight: bold; height: 20px;")
-        btn_a_up.clicked.connect(lambda: self.upload_novel_file(self.edit_novel_audio_path, self.edit_novel_audio_url))
-        
-        lbl_a_url = QLabel("URL")
-        lbl_a_url.setStyleSheet("color: #28a745; font-weight: bold;")
-        self.edit_novel_audio_url = QLineEdit()
-        self.edit_novel_audio_url.setPlaceholderText("URL")
-        
-        btn_a_down = QPushButton("다운")
-        btn_a_down.setFixedWidth(90)
-        btn_a_down.setStyleSheet("background-color: #17a2b8; color: white; font-weight: bold; height: 20px;")
-        btn_a_down.clicked.connect(lambda: self.download_novel_file(self.edit_novel_audio_url, "audio"))
-        
-        btn_a_del = QPushButton("삭제")
-        btn_a_del.setFixedWidth(90)
-        btn_a_del.setStyleSheet("background-color: #dc3545; color: white; font-weight: bold; height: 20px;")
-        btn_a_del.clicked.connect(lambda: self.delete_novel_file(self.edit_novel_audio_url))
-        
-        a_layout.addWidget(self.edit_novel_audio_path)
-        a_layout.addWidget(btn_a_sel)
-        a_layout.addWidget(btn_a_up)
-        a_layout.addWidget(lbl_a_url)
-        a_layout.addWidget(self.edit_novel_audio_url)
-        a_layout.addWidget(btn_a_down)
-        a_layout.addWidget(btn_a_del)
-        self.audio_group.setLayout(a_layout)
-        upload_section.addWidget(self.audio_group)
-
-        # 2. SRT Upload
-        self.srt_upload_group = QGroupBox("SRT 자막 파일 업로드 (SRT Upload)")
-        self.srt_upload_group.setStyleSheet("QGroupBox { font-weight: bold; color: #3498db; }")
-        s_layout = QHBoxLayout()
-        self.edit_novel_srt_path = QLineEdit()
-        self.edit_novel_srt_path.setPlaceholderText("파일 선택 (.srt)")
-        btn_s_sel = QPushButton("선택")
-        btn_s_sel.setFixedWidth(90)
-        btn_s_sel.setStyleSheet("height: 20px;")
-        btn_s_sel.clicked.connect(lambda: self.browse_single_file(self.edit_novel_srt_path, "SRT Files (*.srt)"))
-        
-        btn_s_up = QPushButton("업로드")
-        btn_s_up.setFixedWidth(90)
-        btn_s_up.setStyleSheet("background-color: #6f42c1; color: white; font-weight: bold; height: 20px;")
-        btn_s_up.clicked.connect(lambda: self.upload_novel_file(self.edit_novel_srt_path, self.edit_novel_srt_url))
-        
-        lbl_s_url = QLabel("URL")
-        lbl_s_url.setStyleSheet("color: #28a745; font-weight: bold;")
-        self.edit_novel_srt_url = QLineEdit()
-        self.edit_novel_srt_url.setPlaceholderText("URL")
-        
-        btn_s_down = QPushButton("다운")
-        btn_s_down.setFixedWidth(90)
-        btn_s_down.setStyleSheet("background-color: #17a2b8; color: white; font-weight: bold; height: 20px;")
-        btn_s_down.clicked.connect(lambda: self.download_novel_file(self.edit_novel_srt_url, "srt"))
-        
-        btn_s_del = QPushButton("삭제")
-        btn_s_del.setFixedWidth(90)
-        btn_s_del.setStyleSheet("background-color: #dc3545; color: white; font-weight: bold; height: 20px;")
-        btn_s_del.clicked.connect(lambda: self.delete_novel_file(self.edit_novel_srt_url))
-        
-        s_layout.addWidget(self.edit_novel_srt_path)
-        s_layout.addWidget(btn_s_sel)
-        s_layout.addWidget(btn_s_up)
-        s_layout.addWidget(lbl_s_url)
-        s_layout.addWidget(self.edit_novel_srt_url)
-        s_layout.addWidget(btn_s_down)
-        s_layout.addWidget(btn_s_del)
-        self.srt_upload_group.setLayout(s_layout)
-        upload_section.addWidget(self.srt_upload_group)
-        
-        form_wrapper.addLayout(upload_section)
-        
-        b_layout = QHBoxLayout()
-        btn_save = QPushButton("💾 저장")
-        btn_save.setStyleSheet("background-color: #28a745; color: white; height: 20px; font-weight: bold;")
-        btn_save.clicked.connect(self.save_novel_arc)
-        
-        self.btn_delete_novel_arc = QPushButton("🗑️ 삭제")
-        self.btn_delete_novel_arc.setStyleSheet("background-color: #dc3545; color: white; height: 20px; font-weight: bold;")
-        self.btn_delete_novel_arc.clicked.connect(self.delete_novel_arc)
-        
-        btn_list = QPushButton("📋 리스트")
-        btn_list.setStyleSheet("background-color: #6c757d; color: white; height: 20px; font-weight: bold;")
-        btn_list.clicked.connect(lambda: self.novel_stack.setCurrentIndex(0))
-        
-        b_layout.addStretch()
-        b_layout.addWidget(btn_save)
-        b_layout.addWidget(self.btn_delete_novel_arc)
-        b_layout.addWidget(btn_list)
-        form_wrapper.addLayout(b_layout)
-        form_wrapper.addStretch() # Pushes everything to the top
-        
-        self.novel_form_page.setLayout(form_wrapper)
-        self.novel_stack.addWidget(self.novel_form_page)
-        
-        self.novel_tab_layout.addWidget(self.novel_stack)
-        self.tab_novel_script.setLayout(self.novel_tab_layout)
-        
-        # Load initial data
-        self.load_novel_list()
-
-    def load_novel_list(self):
-        try:
-            if not getattr(self, 'tts_client', None):
-                 self.tts_client = ElevenLabsClient()
-            conn = self.tts_client.get_db_connection()
-            cursor = conn.cursor(dictionary=True)
-            
-            search_text = self.edit_novel_search.text().strip()
-            where_clause = ""
-            params = []
-            if search_text:
-                where_clause = "WHERE n.title LIKE %s OR a.arc_title LIKE %s"
-                params = [f"%{search_text}%", f"%{search_text}%"]
-            
-            # Count for pagination
-            count_query = f"SELECT COUNT(*) as cnt FROM novel_arcs a JOIN novel_works n ON a.novel_id = n.novel_id {where_clause}"
-            cursor.execute(count_query, tuple(params))
-            total_count = cursor.fetchone()['cnt']
-            
-            self.total_novel_pages = math.ceil(total_count / self.novel_items_per_page)
-            if self.total_novel_pages < 1: self.total_novel_pages = 1
-            if self.current_novel_page > self.total_novel_pages: self.current_novel_page = self.total_novel_pages
-            if self.current_novel_page < 1: self.current_novel_page = 1
-            
-            offset = (self.current_novel_page - 1) * self.novel_items_per_page
-            
-            query = f"""
-                SELECT a.*, n.title, n.subtitle, n.genre, n.target_audience
-                FROM novel_arcs a
-                JOIN novel_works n ON a.novel_id = n.novel_id
-                {where_clause}
-                ORDER BY a.created_dt DESC, a.novel_id DESC, a.arc_id DESC
-                LIMIT {self.novel_items_per_page} OFFSET {offset}
-            """
-            cursor.execute(query, tuple(params))
-            rows = cursor.fetchall()
-            
-            self.lbl_novel_page_info.setText(f"{self.current_novel_page} / {self.total_novel_pages}")
-            self.btn_novel_prev.setEnabled(self.current_novel_page > 1)
-            self.btn_novel_next.setEnabled(self.current_novel_page < self.total_novel_pages)
-            
-            self.novel_table.setRowCount(0)
-            for row in rows:
-                r_idx = self.novel_table.rowCount()
-                self.novel_table.insertRow(r_idx)
-                
-                # Column Order: Novel ID, Arc ID, No, Title, Subtitle, Genre, Target, Arc Title, Created
-                self.novel_table.setItem(r_idx, 0, QTableWidgetItem(str(row['novel_id'])))
-                self.novel_table.setItem(r_idx, 1, QTableWidgetItem(str(row['arc_id'])))
-                self.novel_table.setItem(r_idx, 2, QTableWidgetItem(str(row['arc_number'])))
-                self.novel_table.setItem(r_idx, 3, QTableWidgetItem(str(row['title'] or '')))
-                self.novel_table.setItem(r_idx, 4, QTableWidgetItem(str(row['subtitle'] or '')))
-                self.novel_table.setItem(r_idx, 5, QTableWidgetItem(str(row['genre'] or '')))
-                self.novel_table.setItem(r_idx, 6, QTableWidgetItem(str(row['target_audience'] or '')))
-                self.novel_table.setItem(r_idx, 7, QTableWidgetItem(str(row['arc_title'] or '')))
-                
-                dt = row['created_dt']
-                dt_str = dt.strftime("%Y-%m-%d %H:%M:%S") if dt else ""
-                item_dt = QTableWidgetItem(dt_str)
-                item_dt.setTextAlignment(Qt.AlignCenter)
-                self.novel_table.setItem(r_idx, 8, item_dt)
-                
-            cursor.close()
-            conn.close()
-        except Exception as e:
-            self.log_signal.emit(f"소설 목록 로드 오류: {e}")
-
-    def change_novel_page(self, delta):
-        self.current_novel_page += delta
-        self.load_novel_list()
-
-    def on_novel_cell_double_click(self, row, col):
-        novel_id = self.novel_table.item(row, 0).text()
-        arc_id = self.novel_table.item(row, 1).text()
-        self.switch_to_novel_form(novel_id, arc_id)
-
-    def on_novel_selection_changed(self):
-        curr_arc_id = self.lbl_arc_id_val.text()
-        if curr_arc_id == "신규":
-            novel_id = self.combo_arc_novel.currentData()
-            if novel_id:
-                self.fetch_next_arc_number(novel_id)
-
-    def fetch_next_arc_number(self, novel_id):
-        try:
-            conn = self.tts_client.get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT IFNULL(MAX(arc_number), 0) + 1 FROM novel_arcs WHERE novel_id = %s", (novel_id,))
-            next_no = cursor.fetchone()[0]
-            self.edit_arc_no.setText(str(next_no))
-            cursor.close()
-            conn.close()
-        except:
-            pass
-
-    def switch_to_novel_form(self, novel_id, arc_id):
-        # Load Novel Dropdown
-        self.load_novels()
-        
-        # Reset fields
-        self.edit_arc_no.clear()
-        self.edit_arc_title.clear()
-        self.txt_arc_content.clear()
-        self.txt_arc_srt.clear()
-        self.txt_arc_next.clear()
-        self.txt_arc_prompt.clear()
-        self.lbl_novel_id_val.setText("-")
-        self.lbl_arc_id_val.setText("-")
-        
-        # Reset upload fields
-        self.edit_novel_audio_path.clear()
-        self.edit_novel_audio_url.clear()
-        self.edit_novel_srt_path.clear()
-        self.edit_novel_srt_url.clear()
-        
-        if novel_id and arc_id:
-            # Edit Mode
-            self.lbl_novel_id_val.setText(str(novel_id))
-            self.lbl_arc_id_val.setText(str(arc_id))
-            self.combo_arc_novel.setEnabled(False)
-            self.btn_delete_novel_arc.show()
-            self.load_novel_arc_detail(novel_id, arc_id)
-        else:
-            # New Mode
-            self.lbl_novel_id_val.setText("신규")
-            self.lbl_arc_id_val.setText("신규")
-            self.combo_arc_novel.setEnabled(True)
-            self.btn_delete_novel_arc.hide()
-            # Set default arc number for first novel
-            self.on_novel_selection_changed()
-        
-        self.novel_stack.setCurrentIndex(1)
-
-    def load_novels(self):
-        try:
-            if not getattr(self, 'tts_client', None):
-                 self.tts_client = ElevenLabsClient()
-            conn = self.tts_client.get_db_connection()
-            cursor = conn.cursor(dictionary=True)
-            cursor.execute("SELECT novel_id, title FROM novel_works WHERE status <> '0' ORDER BY title ASC")
-            rows = cursor.fetchall()
-            self.combo_arc_novel.clear()
-            for row in rows:
-                self.combo_arc_novel.addItem(row['title'], row['novel_id'])
-            cursor.close()
-            conn.close()
-        except Exception as e:
-            print(f"Novels load error: {e}")
-
-    def load_novel_arc_detail(self, novel_id, arc_id):
-        try:
-            conn = self.tts_client.get_db_connection()
-            cursor = conn.cursor(dictionary=True)
-            cursor.execute("SELECT * FROM novel_arcs WHERE novel_id = %s AND arc_id = %s", (novel_id, arc_id))
-            row = cursor.fetchone()
-            cursor.close()
-            conn.close()
-            
-            if row:
-                idx = self.combo_arc_novel.findData(row['novel_id'])
-                if idx >= 0: self.combo_arc_novel.setCurrentIndex(idx)
-                
-                self.edit_arc_no.setText(str(row['arc_number']))
-                self.edit_arc_title.setText(row['arc_title'] or "")
-                self.txt_arc_content.setPlainText(row['content'] or "")
-                self.txt_arc_srt.setPlainText(row.get('srt_content') or "")
-                self.txt_arc_next.setPlainText(row['next_arc'] or "")
-                self.txt_arc_prompt.setPlainText(row['image_prompt'] or "")
-                self.edit_novel_audio_url.setText(row.get('audio_path') or "")
-                self.edit_novel_srt_url.setText(row.get('srt_path') or "")
-        except Exception as e:
-            QMessageBox.warning(self, "오류", f"상세 정보 조회 실패: {e}")
-
-    def delete_novel_arc(self):
-        novel_id = self.lbl_novel_id_val.text()
-        arc_id = self.lbl_arc_id_val.text()
-        if novel_id == "신규": return
-        
-        reply = QMessageBox.question(self, '삭제 확인', '정말 삭제하시겠습니까?', QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if reply == QMessageBox.Yes:
-            try:
-                conn = self.tts_client.get_db_connection()
-                cursor = conn.cursor()
-                cursor.execute("DELETE FROM novel_arcs WHERE novel_id = %s AND arc_id = %s", (novel_id, arc_id))
-                conn.commit()
-                cursor.close()
-                conn.close()
-                QMessageBox.information(self, "완료", "삭제되었습니다.")
-                self.novel_stack.setCurrentIndex(0)
-                self.load_novel_list()
-            except Exception as e:
-                QMessageBox.critical(self, "오류", f"삭제 실패: {e}")
-
-    def save_novel_arc(self):
-        novel_id = self.combo_arc_novel.currentData()
-        arc_no = self.edit_arc_no.text().strip()
-        arc_title = self.edit_arc_title.text().strip()
-        content = self.txt_arc_content.toPlainText().strip()
-        srt_content = self.txt_arc_srt.toPlainText().strip()
-        next_arc = self.txt_arc_next.toPlainText().strip()
-        prompt = self.txt_arc_prompt.toPlainText().strip()
-        audio_path_val = self.edit_novel_audio_url.text().strip()
-        srt_path_val = self.edit_novel_srt_url.text().strip()
-        
-        if not novel_id or not arc_no or not arc_title:
-            QMessageBox.warning(self, "입력 오류", "소설 선택, 회차 번호, 제목은 필수입니다.")
-            return
-            
-        try:
-            conn = self.tts_client.get_db_connection()
-            cursor = conn.cursor()
-            
-            curr_novel_id_str = self.lbl_novel_id_val.text()
-            curr_arc_id_str = self.lbl_arc_id_val.text()
-            
-            # Debug Log
-            self.log_signal.emit(f"📝 DB 저장 시도: novel_id={novel_id}, arc_no={arc_no}, audio_path={audio_path_val}")
-            
-            if curr_arc_id_str == "신규":
-                # Get Next ARC_ID (Record PK) for this novel
-                cursor.execute("SELECT IFNULL(MAX(arc_id), 0) + 1 FROM novel_arcs WHERE novel_id = %s", (novel_id,))
-                new_arc_id = cursor.fetchone()[0]
-                
-                query = """
-                    INSERT INTO novel_arcs (novel_id, arc_id, arc_number, arc_title, content, srt_content, audio_path, srt_path, next_arc, image_prompt, status)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, '1')
-                """
-                cursor.execute(query, (novel_id, new_arc_id, arc_no, arc_title, content, srt_content, audio_path_val, srt_path_val, next_arc, prompt))
-            else:
-                query = """
-                    UPDATE novel_arcs 
-                    SET novel_id=%s, arc_number=%s, arc_title=%s, content=%s, srt_content=%s, audio_path=%s, srt_path=%s, next_arc=%s, image_prompt=%s, status='1'
-                    WHERE novel_id=%s AND arc_id=%s
-                """
-                # Use current hidden values to target correct record
-                cursor.execute(query, (novel_id, arc_no, arc_title, content, srt_content, audio_path_val, srt_path_val, next_arc, prompt, int(curr_novel_id_str), int(curr_arc_id_str)))
-            
-            conn.commit()
-            cursor.close()
-            conn.close()
-            
-            QMessageBox.information(self, "성공", "저장되었습니다.")
-            self.novel_stack.setCurrentIndex(0)
-            self.load_novel_list()
-        except Exception as e:
-            QMessageBox.critical(self, "저장 오류", f"DB 저장 중 오류 발생:\n{e}")
-
-    # --- 서버 파일 업로드 로직 ---
-    def upload_novel_file(self, edit_path, edit_url):
-        file_path = edit_path.text().strip()
-        if not file_path or not os.path.exists(file_path):
-            QMessageBox.warning(self, "입력 오류", "업로드할 파일을 먼저 선택해주세요.")
-            return
-            
-        url = "https://lo.devlab.pics/api/file/upload"
-        try:
-            with open(file_path, 'rb') as f:
-                files = {'file': f}
-                self.log_signal.emit(f"🚀 파일 업로드 중: {file_path}")
-                resp = requests.post(url, files=files, timeout=300)
-                
-                if resp.status_code == 200:
-                    data = resp.json()
-                    file_url = data.get('url')
-                    edit_url.setText(file_url)
-                    self.log_signal.emit(f"✅ 업로드 성공: {file_url}")
-                    
-                    # --- Proactive Immediate DB Update ---
-                    curr_novel_id = self.lbl_novel_id_val.text()
-                    curr_arc_id = self.lbl_arc_id_val.text()
-                    
-                    if curr_novel_id != "신규" and curr_arc_id != "신규":
-                        col_target = "audio_path" if edit_url == self.edit_novel_audio_url else "srt_path"
-                        try:
-                            conn = self.tts_client.get_db_connection()
-                            cursor = conn.cursor()
-                            up_query = f"UPDATE novel_arcs SET {col_target} = %s WHERE novel_id = %s AND arc_id = %s"
-                            cursor.execute(up_query, (file_url, int(curr_novel_id), int(curr_arc_id)))
-                            conn.commit()
-                            cursor.close()
-                            conn.close()
-                            self.log_signal.emit(f"💾 DB 즉시 업데이트 완료 ({col_target})")
-                        except Exception as up_e:
-                            self.log_signal.emit(f"⚠️ DB 즉시 업데이트 실패: {up_e}")
-
-                    QMessageBox.information(self, "성공", "파일이 성공적으로 업로드되었습니다.")
-                else:
-                    self.log_signal.emit(f"❌ 업로드 실패: {resp.status_code}")
-                    QMessageBox.critical(self, "오류", f"업로드 실패 ({resp.status_code}):\n{resp.text}")
-        except Exception as e:
-            self.log_signal.emit(f"❌ 업로드 도중 예외 발생: {e}")
-            QMessageBox.critical(self, "오류", f"통신 오류 발생:\n{e}")
-
-    def download_novel_file(self, edit_url, file_type="audio"):
-        url = edit_url.text().strip()
-        if not url:
-            QMessageBox.warning(self, "입력 오류", "다운로드할 URL이 없습니다.")
-            return
-            
-        # Suggested naming: NovelTitle_ArcNo.ext
-        novel_title = self.combo_arc_novel.currentText().strip()
-        arc_no = self.edit_arc_no.text().strip()
-        ext = "mp3" if file_type == "audio" else "srt"
-        # Remove invalid filename characters
-        safe_title = re.sub(r'[\/:*?"<>|]', '', novel_title)
-        suggested_name = f"{safe_title}_{arc_no}.{ext}"
-        
-        filter_str = "Audio Files (*.mp3 *.wav)" if file_type == "audio" else "SRT Files (*.srt)"
-        
-        save_path, _ = QFileDialog.getSaveFileName(self, "파일 직접 다운로드", suggested_name, filter_str)
-        if not save_path:
-            return
-            
-        try:
-            self.log_signal.emit(f"📥 파일 다운로드 시작: {url}")
-            resp = requests.get(url, timeout=60, stream=True)
-            if resp.status_code == 200:
-                with open(save_path, 'wb') as f:
-                    for chunk in resp.iter_content(chunk_size=8192):
-                        f.write(chunk)
-                self.log_signal.emit(f"✅ 다운로드 완료: {save_path}")
-                QMessageBox.information(self, "완료", f"파일이 성공적으로 다운로드되었습니다.\n{save_path}")
-            else:
-                self.log_signal.emit(f"❌ 다운로드 실패 ({resp.status_code})")
-                QMessageBox.critical(self, "오류", f"다운로드 실패 ({resp.status_code})")
-        except Exception as e:
-            self.log_signal.emit(f"❌ 다운로드 도중 예외: {e}")
-            QMessageBox.critical(self, "오류", f"다운로드 중 오류 발생:\n{e}")
-
-    def delete_novel_file(self, edit_url):
-        url_text = edit_url.text().strip()
-        if not url_text:
-            return
-            
-        reply = QMessageBox.question(self, '삭제 확인', '서버에서 이 파일을 정말 삭제하시겠습니까?\n(경로: ' + url_text + ')', 
-                                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if reply == QMessageBox.Yes:
-            # Java: @DeleteMapping("/delete") @RequestParam("filePath")
-            # filePath는 서버의 로컬 경로여야 함. (/home/dist/html/file/...)
-            # URL 예시: https://image.devlab.pics/file/2026/02/uuid.mp3 
-            
-            # 클라이언트 측 추정: URL에서 경로 추출 
-            # (Java 코드 참고: basePath=/home/dist/html/file, baseUrl=https://image.devlab.pics/file)
-            target_file_path = ""
-            if "image.devlab.pics/file/" in url_text:
-                rel_path = url_text.split("image.devlab.pics/file/")[1]
-                target_file_path = f"/home/dist/html/file/{rel_path}"
-            else:
-                target_file_path = url_text
-                
-            delete_api_url = "https://lo.devlab.pics/api/file/delete"
-            try:
-                params = {"filePath": target_file_path}
-                self.log_signal.emit(f"🗑️ 서버 파일 삭제 요청: {target_file_path}")
-                resp = requests.delete(delete_api_url, params=params, timeout=30)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    if data.get('success'):
-                        QMessageBox.information(self, "완료", "서버 파일이 삭제되었습니다.")
-                        edit_url.clear()
-                    else:
-                        QMessageBox.warning(self, "실패", f"삭제 실패: {data.get('message')}")
-                else:
-                    self.log_signal.emit(f"❌ 삭제 실패: {resp.status_code}")
-                    QMessageBox.warning(self, "실패", f"삭제 실패 ({resp.status_code}):\n{resp.text}")
-            except Exception as e:
-                self.log_signal.emit(f"❌ 삭제 도중 예외 발생: {e}")
-                QMessageBox.critical(self, "오류", f"통신 오류:\n{e}")
-
-    # ========== 인트로 (Intro) 생성 ==========
-
-    def initTabIntro(self):
-        main_layout = QHBoxLayout()
-        
-        # --- Left: Form ---
-        left_widget = QWidget()
-        left_layout = QVBoxLayout()
-        left_widget.setLayout(left_layout)
-        left_widget.setFixedWidth(400)
-        
-        form_group = QGroupBox("인트로 이미지 생성")
-        form_layout = QFormLayout()
-        form_layout.setSpacing(10)
-        
-        self.edit_intro_text1 = QLineEdit()
-        self.edit_intro_text1.setPlaceholderText("[천찬혈로:피로 물든 강호의 길]")
-        # self.edit_intro_text1.setText("[천찬혈로:피로 물든 강호의 길]") # 초기 텍스트 제거
-        
-        self.edit_intro_text2 = QLineEdit()
-        self.edit_intro_text2.setPlaceholderText("제 1 화 - 혈야")
-        # self.edit_intro_text2.setText("제 1 화 - 혈야") # 초기 텍스트 제거
-        
-        self.combo_intro_font = QComboBox()
-        self.combo_intro_font.setMinimumWidth(200)
-        
-        self.spin_intro_font_size = QSpinBox()
-        self.spin_intro_font_size.setRange(20, 500)
-        self.spin_intro_font_size.setValue(55)
-        
-        # Color Buttons
-        self.btn_intro_text_color = QPushButton("#ffffff")
-        self.btn_intro_text_color.current_color = "#ffffff"
-        self.btn_intro_text_color.setStyleSheet("background-color: #ffffff; color: black; font-weight: bold; height: 30px;")
-        self.btn_intro_text_color.clicked.connect(lambda: self.pick_intro_color(self.btn_intro_text_color))
-        
-        self.btn_intro_bg_color = QPushButton("#000000")
-        self.btn_intro_bg_color.current_color = "#000000"
-        self.btn_intro_bg_color.setStyleSheet("background-color: #000000; color: white; font-weight: bold; height: 30px;")
-        self.btn_intro_bg_color.clicked.connect(lambda: self.pick_intro_color(self.btn_intro_bg_color))
-
-        self.lbl_intro_size = QLineEdit("1344 x 768 (WebToon)")
-        self.lbl_intro_size.setReadOnly(True)
-        self.lbl_intro_size.setStyleSheet("background-color: #2b2b2b; color: #888; border: none;")
-        
-        form_layout.addRow("텍스트 1줄:", self.edit_intro_text1)
-        form_layout.addRow("텍스트 2줄:", self.edit_intro_text2)
-        form_layout.addRow("폰트 선택:", self.combo_intro_font)
-        form_layout.addRow("폰트 크기:", self.spin_intro_font_size)
-        form_layout.addRow("텍스트 색상:", self.btn_intro_text_color)
-        form_layout.addRow("배경 색상:", self.btn_intro_bg_color)
-        form_layout.addRow("이미지 크기:", self.lbl_intro_size)
-        
-        form_group.setLayout(form_layout)
-        left_layout.addWidget(form_group)
-        
-        # Save Location
-        path_group = QGroupBox("저장 위치 설정")
-        path_layout = QHBoxLayout()
-        self.edit_intro_save_dir = QLineEdit(r"D:\youtube")
-        btn_intro_browse = QPushButton("폴더 선택")
-        btn_intro_browse.setFixedWidth(90)
-        btn_intro_browse.setStyleSheet("background-color: #0078d4; color: white; border-radius: 4px;")
-        btn_intro_browse.clicked.connect(lambda: self.browse_folder(self.edit_intro_save_dir))
-        path_layout.addWidget(self.edit_intro_save_dir)
-        path_layout.addWidget(btn_intro_browse)
-        path_group.setLayout(path_layout)
-        left_layout.addWidget(path_group)
-        
-        # Action Buttons
-        self.btn_intro_save = QPushButton("💾 1.jpg 파일 생성 (Save)")
-        self.btn_intro_save.setStyleSheet("""
-            QPushButton { height: 60px; font-weight: bold; background-color: #0d6efd; color: white; border-radius: 8px; font-size: 16px; }
-            QPushButton:hover { background-color: #0b5ed7; }
-        """)
-        self.btn_intro_save.clicked.connect(self.save_intro_image)
-        left_layout.addWidget(self.btn_intro_save)
-        
-        self.intro_log = QTextEdit()
-        self.intro_log.setReadOnly(True)
-        self.intro_log.setStyleSheet("background-color: #1e1e1e; color: #d4d4d4;")
-        self.intro_log.setMaximumHeight(150)
-        left_layout.addWidget(self.intro_log)
-        
-        left_layout.addStretch()
-        
-        # --- Right: Preview ---
-        right_panel = QVBoxLayout()
-        preview_label_title = QLabel("미리보기 (Preview)")
-        preview_label_title.setAlignment(Qt.AlignCenter)
-        preview_label_title.setStyleSheet("font-weight: bold; margin-bottom: 5px;")
-        right_panel.addWidget(preview_label_title)
-        
-        self.lbl_intro_preview = QLabel()
-        self.lbl_intro_preview.setAlignment(Qt.AlignCenter)
-        self.lbl_intro_preview.setStyleSheet("border: 1px solid #444; background-color: #1a1a1a;")
-        self.lbl_intro_preview.setMinimumSize(400, 300)
-        self.lbl_intro_preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        right_panel.addWidget(self.lbl_intro_preview, 1)
-        
-        main_layout.addWidget(left_widget)
-        main_layout.addLayout(right_panel, 1)
-        
-        self.tab_intro.setLayout(main_layout)
-        
-        # Connections
-        self.edit_intro_text1.textChanged.connect(self.update_intro_preview)
-        self.edit_intro_text2.textChanged.connect(self.update_intro_preview)
-        self.combo_intro_font.currentIndexChanged.connect(self.update_intro_preview)
-        self.spin_intro_font_size.valueChanged.connect(self.update_intro_preview)
-        
-        # Store current pixmap for saving
-        self.current_intro_pixmap = None
-        
-        # Initial preview draw
-        QTimer.singleShot(500, self.update_intro_preview)
-
-    def pick_intro_color(self, btn):
-        color = QColorDialog.getColor(QColor(btn.current_color))
-        if color.isValid():
-            hex_color = color.name()
-            btn.current_color = hex_color
-            btn.setText(hex_color)
-            # Contrast text color
-            text_c = 'black' if color.lightness() > 128 else 'white'
-            btn.setStyleSheet(f"background-color: {hex_color}; color: {text_c}; font-weight: bold; height: 30px;")
-            self.update_intro_preview()
-
-    def update_intro_preview(self):
-        try:
-            # High-res Canvas
-            W, H = 1344, 768
-            pixmap = QPixmap(W, H)
-            
-            bg_color = QColor(self.btn_intro_bg_color.current_color)
-            pixmap.fill(bg_color)
-            
-            painter = QPainter(pixmap)
-            painter.setRenderHint(QPainter.Antialiasing)
-            painter.setRenderHint(QPainter.TextAntialiasing)
-            
-            text1 = self.edit_intro_text1.text().strip()
-            text2 = self.edit_intro_text2.text().strip()
-            font_family = self.combo_intro_font.currentText()
-            font_size = self.spin_intro_font_size.value()
-            text_color = QColor(self.btn_intro_text_color.current_color)
-            
-            font = QFont(font_family, font_size)
-            painter.setFont(font)
-            painter.setPen(text_color)
-            
-            fm = painter.fontMetrics()
-            
-            # Line 1 height
-            h1 = fm.height()
-            # Line 2 height
-            h2 = fm.height()
-            
-            gap = 30
-            total_h = h1 + h2 + gap
-            start_y = (H - total_h) // 2
-            
-            # Draw Line 1
-            painter.drawText(QRect(0, start_y, W, h1), Qt.AlignCenter, text1)
-            # Draw Line 2
-            painter.drawText(QRect(0, start_y + h1 + gap, W, h2), Qt.AlignCenter, text2)
-            
-            painter.end()
-            
-            self.current_intro_pixmap = pixmap
-            
-            # Scale to fit label
-            label_size = self.lbl_intro_preview.size()
-            if label_size.width() > 10 and label_size.height() > 10:
-                scaled = pixmap.scaled(label_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                self.lbl_intro_preview.setPixmap(scaled)
-                
-        except Exception as e:
-            print(f"Intro Preview Error: {e}")
-
-    def save_intro_image(self):
-        if self.current_intro_pixmap is None:
-            self.update_intro_preview()
-            
-        save_dir = self.edit_intro_save_dir.text().strip()
-        if not save_dir:
-            QMessageBox.warning(self, "경고", "저장 폴더를 지정해주세요.")
-            return
-            
-        if not os.path.exists(save_dir):
-            try: os.makedirs(save_dir)
-            except: pass
-            
-        save_path = os.path.join(save_dir, "1.jpg")
-        
-        try:
-            success = self.current_intro_pixmap.save(save_path, "JPG", 95)
-            if success:
-                self.intro_log.append(f"✅ 인트로 저장 완료: {save_path}")
-                QMessageBox.information(self, "성공", f"이미지 생성이 완료되었습니다.\n{save_path}")
-                # os.startfile(save_dir) # 탐색기 자동 열기 제거
-            else:
-                QMessageBox.critical(self, "오류", "파일 저장 중에 실패했습니다.")
-        except Exception as e:
-            QMessageBox.critical(self, "오류", f"저장 중 예외 발생:\n{e}")
 
 
 
@@ -6832,11 +6141,12 @@ class AudioToVideoWorker(QThread):
     finished = pyqtSignal(str, float)
     error = pyqtSignal(str)
     
-    def __init__(self, target_dir, style, output_path):
+    def __init__(self, target_dir, style, output_path, scenes_data=None):
         super().__init__()
         self.target_dir = target_dir
         self.style = style # Dictionary of style settings
         self.output_path = output_path
+        self.scenes_data = scenes_data
         self.temp_sub_dir = os.path.join(self.target_dir, "temp_subs")
 
     def run(self):
@@ -6872,55 +6182,78 @@ class AudioToVideoWorker(QThread):
             self.log_signal.emit(f"🚀 작업 시작: {mp3_files[0]} + {srt_files[0]}")
 
             # 3. 오디오 길이 확인
-            duration = self.get_audio_duration(ffmpeg_exe, mp3_path)
+            duration = get_audio_duration(ffmpeg_exe, mp3_path)
             if duration == 0:
                 self.error.emit("오디오 길이를 측정할 수 없습니다.")
                 return
 
-            # 4. SRT 파싱 (정규식 기반으로 개선하여 누락 방지)
-            segments = self.parse_srt_robust(srt_path)
-            self.log_signal.emit(f"📊 SRT 파싱 완료: {len(segments)}개 트랙 발견")
+            if self.scenes_data:
+                segments = []
+                for s in self.scenes_data:
+                    segments.append({
+                        'index': s['index'],
+                        'start': s['start'],
+                        'end': s['end'],
+                        'text': s['text'],
+                        'source': os.path.join(self.target_dir, s['bg_file']) if s['bg_file'] else None,
+                        'overlay': os.path.join(self.target_dir, s['overlay_file']) if s['overlay_file'] else None,
+                        'speed': s.get('speed', 1.0)
+                    })
+                self.log_signal.emit(f"📊 타임라인 데이터 로드 완료: {len(segments)}개 씬")
+            else:
+                # 4. SRT 파싱 (정규식 기반으로 개선하여 누락 방지)
+                segments = parse_srt_robust(srt_path)
+                self.log_signal.emit(f"📊 SRT 파싱 완료: {len(segments)}개 트랙 발견")
 
-            # 5. 모든 세그먼트에 대해 배경 파일 매핑 (Hold 로직 강화)
-            self.log_signal.emit("🔍 파일 매칭 및 배경 유지 로직 가동...")
-            
+                # 5. 모든 세그먼트에 대해 배경 파일 매핑 (Hold 로직 강화)
+                self.log_signal.emit("🔍 파일 매칭 및 배경 유지 로직 가동...")
+                
+                # 기본 배경 (검정 화면 생성)
+                if not os.path.exists(self.temp_sub_dir): os.makedirs(self.temp_sub_dir, exist_ok=True)
+                black_p = os.path.join(self.temp_sub_dir, "black_start.png")
+                Image.new('RGB', (1920, 1080), (0,0,0)).save(black_p)
+                
+                last_found_file = black_p
+                for seg in segments:
+                    idx = seg['index']
+                    match_found = None
+                    # 파일명 시작이 "번호." 또는 "번호 " 또는 "번호_" 인 것 찾기
+                    pattern = re.compile(rf"^{idx}[.\s_].*")
+                    for f_name in files:
+                        if pattern.match(f_name.lower()):
+                            match_found = os.path.join(self.target_dir, f_name)
+                            break
+                    
+                    if match_found:
+                        seg['source'] = match_found
+                        last_found_file = match_found
+                    else:
+                        seg['source'] = last_found_file # 이전 파일 유지 (Hold)
+                    seg['overlay'] = None
+                    seg['speed'] = 1.0
+
             if os.path.exists(self.temp_sub_dir):
                 shutil.rmtree(self.temp_sub_dir, ignore_errors=True)
             os.makedirs(self.temp_sub_dir, exist_ok=True)
-
-            # 기본 배경 (검정 화면 생성)
-            black_p = os.path.join(self.temp_sub_dir, "black_start.png")
-            Image.new('RGB', (1920, 1080), (0,0,0)).save(black_p)
-            
-            last_found_file = black_p
-            for seg in segments:
-                idx = seg['index']
-                match_found = None
-                # 파일명 시작이 "번호." 또는 "번호 " 또는 "번호_" 인 것 찾기
-                pattern = re.compile(rf"^{idx}[.\s_].*")
-                for f_name in files:
-                    if pattern.match(f_name.lower()):
-                        match_found = os.path.join(self.target_dir, f_name)
-                        break
-                
-                if match_found:
-                    seg['source'] = match_found
-                    last_found_file = match_found
-                else:
-                    seg['source'] = last_found_file # 이전 파일 유지 (Hold)
 
             # 6. 비디오 조각 생성 (영상 vs 이미지 분기 처리)
             unified_video_dir = os.path.join(self.temp_sub_dir, "chunks")
             if not os.path.exists(unified_video_dir): os.makedirs(unified_video_dir)
             
-            # 체크포인트 추출 (배경이 실제로 바뀌는 시점만)
+            # 체크포인트 추출 (설정이 바뀌는 시점만)
             checkpoints = []
             if segments:
-                curr_src = None
+                curr_state = None
                 for seg in segments:
-                    if seg['source'] != curr_src:
-                        checkpoints.append({'start': seg['start'], 'source': seg['source']})
-                        curr_src = seg['source']
+                    state = (seg['source'], seg['overlay'], seg['speed'])
+                    if state != curr_state:
+                        checkpoints.append({
+                            'start': seg['start'], 
+                            'source': seg['source'],
+                            'overlay': seg['overlay'],
+                            'speed': seg['speed']
+                        })
+                        curr_state = state
                 # 첫 시작점 보정
                 checkpoints[0]['start'] = 0.0
 
@@ -6943,24 +6276,26 @@ class AudioToVideoWorker(QThread):
                 dur = end_t - start_t
                 ts_path = os.path.join(unified_video_dir, f"chunk_{idx}.ts")
                 src = cp['source']
+                overlay_src = cp.get('overlay')
+                speed = cp.get('speed', 1.0)
                 is_vid = src.lower().endswith(('.mp4', '.mov', '.avi', '.mkv', '.wmv'))
                 
-                cmd = [ffmpeg_exe, "-y", "-threads", "1"] # 병렬 효율을 위해 개별 인스턴스는 1스레드
+                # 영상 속도 적용 (PTS 조절)
+                setpts = f"setpts=PTS/{speed}" if is_vid and speed != 1.0 else "setpts=PTS"
+
+                # 메인 필터 구성
                 if is_vid:
-                    cmd.extend(["-stream_loop", "-1", "-i", src])
-                    vf = f"scale={VW}:{VH}:force_original_aspect_ratio=decrease,pad={VW}:{VH}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p"
+                    # 영상 배경
+                    vf_main = f"scale={VW}:{VH}:force_original_aspect_ratio=decrease,pad={VW}:{VH}:(ow-iw)/2:(oh-ih)/2,setsar=1,{setpts},format=yuv420p"
                 else:
-                    cmd.extend(["-loop", "1", "-i", src])
-                    # [Request] 1번 이미지 고정 체크 시 효과 제거
-                    is_first_img = False
+                    # 이미지 배경 (줌팬)
+                    is_special_img = False
                     base_src = os.path.basename(src).lower()
                     if base_src.startswith("1.") or base_src == "black_start.png":
-                        is_first_img = True
+                        is_special_img = True
                     
                     do_fix = self.style.get('fix_first_img', True)
-                    
-                    if is_first_img and do_fix:
-                        # 고정 (No Animation)
+                    if is_special_img and do_fix:
                         z_expr, x_expr, y_expr = "1", "0", "0"
                     else:
                         z_speed, p_speed = 0.00015, 0.2
@@ -6973,19 +6308,39 @@ class AudioToVideoWorker(QThread):
                             z_expr, x_expr, y_expr = "1.1", f"max((iw-iw/zoom)-(on*{p_speed}), 0)", "ih/2-(ih/zoom/2)"
                     
                     FPS_INTERNAL = 60
-                    vf = (
+                    vf_main = (
                         f"scale={UW}:{UH}:force_original_aspect_ratio=increase,crop={UW}:{UH},format=yuv444p,"
                         f"zoompan=z='{z_expr}':x='trunc({x_expr})':y='trunc({y_expr})':d={int(dur*FPS_INTERNAL)}:s={UW}x{UH}:fps={FPS_INTERNAL},"
                         f"scale={VW}:{VH}:flags=lanczos,format=yuv420p,fps={FPS_OUT}"
                     )
                 
+                # 오버레이 (PiP) 처리
+                cmd = [ffmpeg_exe, "-y", "-threads", "1"]
+                if is_vid:
+                    cmd.extend(["-stream_loop", "-1", "-i", src])
+                else:
+                    cmd.extend(["-loop", "1", "-i", src])
+
+                if overlay_src and os.path.exists(overlay_src):
+                    is_ov_vid = overlay_src.lower().endswith(('.mp4', '.mov', '.avi', '.mkv', '.wmv'))
+                    if is_ov_vid:
+                        cmd.extend(["-stream_loop", "-1", "-i", overlay_src])
+                    else:
+                        cmd.extend(["-loop", "1", "-i", overlay_src])
+                    
+                    # 오버레이 위치 및 크기 (가운데 PiP로 예시, 추후 필요시 조정)
+                    ov_w, ov_h = int(VW * 0.4), int(VH * 0.4)
+                    vf_final = f"[0:v]{vf_main}[bg];[1:v]scale={ov_w}:{ov_h}:force_original_aspect_ratio=decrease,pad={ov_w}:{ov_h}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[ov];[bg][ov]overlay=(W-w)/2:(H-h)/2"
+                else:
+                    vf_final = vf_main
+
                 # 엔코더 선택 (CPU 전용)
                 v_codec = "libx264"
                 preset = "ultrafast"
                 
                 cmd.extend([
                     "-t", f"{dur:.3f}",
-                    "-vf", vf,
+                    "-filter_complex", vf_final,
                     "-c:v", v_codec, "-preset", preset, "-pix_fmt", "yuv420p", "-r", str(FPS_OUT),
                     "-an", ts_path
                 ])
@@ -7085,15 +6440,37 @@ class AudioToVideoWorker(QThread):
             v_codec_final = "libx264"
             final_preset = "superfast" 
             
+            # 8. BGM 및 최종 합성
+            bgm_path = self.style.get('bgm_path')
+            bgm_volume = self.style.get('bgm_volume', 0.1)
+            
             cmd_final = [
                 ffmpeg_exe, "-y",
                 "-f", "concat", "-safe", "0", "-i", concat_list_p,
-                "-i", mp3_path,
-                "-filter_complex", sub_filter,
+                "-i", mp3_path
+            ]
+            
+            filter_str = sub_filter # 기본 자막 필터
+            
+            if bgm_path and os.path.exists(bgm_path):
+                cmd_final.extend(["-stream_loop", "-1", "-i", bgm_path])
+                # 오디오 믹싱: [1:a]는 메인 음성, [2:a]는 BGM
+                # amix: inputs=2, duration=first (메인 음성 길이에 맞춤)
+                filter_str = f"[0:v]{sub_filter}[v_out];[2:a]volume={bgm_volume}[bgm];[1:a][bgm]amix=inputs=2:duration=first[a_out]"
+                map_args = ["-map", "[v_out]", "-map", "[a_out]"]
+            else:
+                filter_str = f"[0:v]{sub_filter}[v_out]"
+                map_args = ["-map", "[v_out]", "-map", "1:a"]
+
+            cmd_final.extend([
+                "-filter_complex", filter_str
+            ])
+            cmd_final.extend(map_args)
+            cmd_final.extend([
                 "-c:v", v_codec_final, "-preset", final_preset, "-crf", "30",
                 "-c:a", "aac", "-b:a", "192k", "-shortest",
                 out_path
-            ]
+            ])
             
             subprocess.run(cmd_final, check=True, creationflags=creation_flags)
 
@@ -7107,39 +6484,39 @@ class AudioToVideoWorker(QThread):
                 try: shutil.rmtree(self.temp_sub_dir)
                 except: pass
 
-    def parse_srt_robust(self, path):
-        import re
-        segments = []
-        try:
-            with open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
-        except:
-            with open(path, 'r', encoding='cp949', errors='ignore') as f: content = f.read()
-        content = content.replace('\r\n', '\n').strip()
-        # 사용가 제공한 정밀 정규식 적용 (구조 누락 방지)
-        pattern = re.compile(r"(\d+)\s+(\d{2}:\d{2}:\d{2}[.,]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[.,]\d{3})\s*(.*?)(?=\n\d+\s+\d{2}:\d{2}:\d{2}[.,]\d{3}|\Z)", re.DOTALL)
-        
-        matches = pattern.finditer(content)
-        for m in matches:
-            segments.append({
-                'index': int(m.group(1)),
-                'start': self.parse_time(m.group(2)),
-                'end': self.parse_time(m.group(3)),
-                'text': m.group(4).strip()
-            })
-        return sorted(segments, key=lambda x: x['start'])
+# --- 공용 유틸리티 함수 ---
+def parse_time(t):
+    t = t.replace(',', '.').replace(' ', '')
+    p = t.split(':')
+    if len(p) == 3:
+        return float(p[0])*3600 + float(p[1])*60 + float(p[2])
+    return 0.0
 
-    def parse_time(self, t):
-        t = t.replace(',', '.').replace(' ', '')
-        p = t.split(':')
-        if len(p) == 3:
-            return float(p[0])*3600 + float(p[1])*60 + float(p[2])
-        return 0.0
+def get_audio_duration(exe, p):
+    r = subprocess.run([exe, "-i", p], stderr=subprocess.PIPE, stdout=subprocess.PIPE, creationflags=0x08000000)
+    m = re.search(r"Duration: (\d+):(\d+):(\d+\.\d+)", r.stderr.decode('utf-8', errors='ignore'))
+    return float(m.group(1))*3600 + float(m.group(2))*60 + float(m.group(3)) if m else 0.0
 
-    def get_audio_duration(self, exe, p):
-        r = subprocess.run([exe, "-i", p], stderr=subprocess.PIPE, stdout=subprocess.PIPE, creationflags=0x08000000)
-        m = re.search(r"Duration: (\d+):(\d+):(\d+\.\d+)", r.stderr.decode('utf-8', errors='ignore'))
-        return float(m.group(1))*3600 + float(m.group(2))*60 + float(m.group(3)) if m else 0.0
-
+def parse_srt_robust(path):
+    import re
+    segments = []
+    try:
+        with open(path, 'r', encoding='utf-8-sig') as f: content = f.read()
+    except:
+        with open(path, 'r', encoding='cp949', errors='ignore') as f: content = f.read()
+    content = content.replace('\r\n', '\n').strip()
+    # 사용자가 제공한 정밀 정규식 적용 (구조 누락 방지)
+    pattern = re.compile(r"(\d+)\s+(\d{2}:\d{2}:\d{2}[.,]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[.,]\d{3})\s*(.*?)(?=\n\d+\s+\d{2}:\d{2}:\d{2}[.,]\d{3}|\Z)", re.DOTALL)
+    
+    matches = pattern.finditer(content)
+    for m in matches:
+        segments.append({
+            'index': int(m.group(1)),
+            'start': parse_time(m.group(2)),
+            'end': parse_time(m.group(3)),
+            'text': m.group(4).strip()
+        })
+    return sorted(segments, key=lambda x: x['start'])
 
 
 
